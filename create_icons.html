@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Icon Generator</title>
+</head>
+<body>
+    <canvas id="canvas16" width="16" height="16"></canvas>
+    <canvas id="canvas48" width="48" height="48"></canvas>
+    <canvas id="canvas128" width="128" height="128"></canvas>
+
+    <script>
+        function createIcon(canvas, size) {
+            const ctx = canvas.getContext('2d');
+            
+            // Background
+            ctx.fillStyle = '#ff6b35';
+            ctx.fillRect(0, 0, size, size);
+            
+            // Arrow down icon
+            ctx.fillStyle = '#ffffff';
+            const centerX = size / 2;
+            const centerY = size / 2;
+            const arrowSize = size * 0.6;
+            
+            // Arrow shaft
+            const shaftWidth = arrowSize * 0.2;
+            ctx.fillRect(centerX - shaftWidth/2, centerY - arrowSize/2, shaftWidth, arrowSize * 0.7);
+            
+            // Arrow head
+            ctx.beginPath();
+            ctx.moveTo(centerX, centerY + arrowSize/2);
+            ctx.lineTo(centerX - arrowSize/3, centerY + arrowSize/6);
+            ctx.lineTo(centerX + arrowSize/3, centerY + arrowSize/6);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Download to file
+            const link = document.createElement('a');
+            link.download = `icon${size}.png`;
+            link.href = canvas.toDataURL();
+            link.click();
+        }
+        
+        // Generate icons
+        setTimeout(() => {
+            createIcon(document.getElementById('canvas16'), 16);
+            createIcon(document.getElementById('canvas48'), 48);
+            createIcon(document.getElementById('canvas128'), 128);
+        }, 100);
+    </script>
+</body>
+</html>
