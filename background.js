@@ -60,7 +60,7 @@ class DownloadManager {
   async startDownload(downloadRequest, sendResponse) {
     try {
       const downloadId = this.generateDownloadId();
-      const { modelInfo, selectedFiles, options } = downloadRequest;
+      const { modelInfo, options } = downloadRequest;
       
       // Get server configuration
       const result = await chrome.storage.local.get(['serverConfig']);
@@ -74,7 +74,6 @@ class DownloadManager {
       this.downloads.set(downloadId, {
         id: downloadId,
         modelInfo,
-        selectedFiles,
         options,
         status: 'initiating',
         progress: 0,
@@ -90,7 +89,6 @@ class DownloadManager {
         repository: modelInfo.fullName,
         branch: modelInfo.branch || 'main',
         repoType: modelInfo.repoType || 'model',
-        files: selectedFiles || [],
         options: {
           includeGitHistory: options?.includeGitHistory || false,
           ...options
@@ -194,7 +192,7 @@ class DownloadManager {
       } catch (error) {
         console.error('Status polling error:', error);
       }
-    }, 2000); // Poll every 2 seconds
+    }, 1000); // Poll every 1 second for real-time updates
 
     // Stop polling after 1 hour to prevent infinite polling
     setTimeout(() => {
@@ -365,7 +363,7 @@ class DownloadManager {
       } catch (error) {
         console.error('Transfer status polling error:', error);
       }
-    }, 3000); // Poll every 3 seconds
+    }, 1500); // Poll every 1.5 seconds for real-time transfer updates
 
     // Stop polling after 2 hours
     setTimeout(() => {

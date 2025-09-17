@@ -14,6 +14,7 @@ class PopupManager {
     this.setupEventListeners();
     this.setupMessageListener();
     this.updateUI();
+    await this.checkInitialServerStatus();
   }
 
   async loadServerConfig() {
@@ -57,6 +58,10 @@ class PopupManager {
     await chrome.storage.local.set({
       serverConfig: { ip, port: '8080', endpoint: '/api/download' }
     });
+    
+    // IP 변경 후 서버 상태 다시 확인
+    console.log(`Server IP changed to: ${ip}`);
+    await this.checkInitialServerStatus();
   }
 
   updateUI() {
@@ -79,39 +84,24 @@ class PopupManager {
 
   renderModelInfo() {
     const model = this.currentModel;
-    const fileCount = model.files ? model.files.length : 0;
-    const modelFiles = model.files ? model.files.filter(f => f.type === 'model').length : 0;
     
     return `
       <div class="repo-info">
         <div class="repo-name">${model.fullName}</div>
         <div class="repo-url">${model.url}</div>
         <div style="margin-top: 8px; font-size: 12px; color: #666;">
-          ${model.repoType || 'model'} • ${fileCount}개 파일 • 모델 파일 ${modelFiles}개
+          ${model.repoType || 'model'} • ${model.branch || 'main'} 브랜치
         </div>
       </div>
       
       <div class="download-section">
-        <button id="download-all" class="download-btn">
-          📥 전체 다운로드
+        <button id="download-repo" class="download-btn">
+          📥 레포지토리 다운로드
         </button>
-        <button id="download-models-only" class="download-btn" style="background: #28a745;">
-          🎯 모델 파일만 다운로드
-        </button>
-      </div>
-      
-      <div class="file-options" style="margin-top: 16px;">
-        <details>
-          <summary style="cursor: pointer; font-size: 13px; font-weight: 600; margin-bottom: 8px;">
-            파일 선택 (${fileCount}개)
-          </summary>
-          <div class="file-list" style="max-height: 200px; overflow-y: auto;">
-            ${this.renderFileList()}
-          </div>
-          <button id="download-selected" class="download-btn" style="margin-top: 8px; background: #6f42c1;">
-            선택 파일 다운로드
-          </button>
-        </details>
+        <div style="margin-top: 8px; font-size: 12px; color: #666; text-align: center;">
+          Git clone으로 전체 레포지토리를 다운로드합니다
+        </div>
+        <div id="server-status" style="margin-top: 8px; font-size: 11px; text-align: center;"></div>
       </div>
       
       <div id="download-status"></div>
@@ -124,44 +114,10 @@ class PopupManager {
     `;
   }
 
-  renderFileList() {
-    if (!this.currentModel.files || this.currentModel.files.length === 0) {
-      return '<div style="color: #666; font-size: 12px; text-align: center; padding: 16px;">파일 목록을 불러올 수 없습니다</div>';
-    }
-
-    return this.currentModel.files.map(file => `
-      <div class="file-item" style="display: flex; align-items: center; padding: 4px 0; border-bottom: 1px solid #eee;">
-        <input type="checkbox" id="file-${file.name}" value="${file.name}" style="margin-right: 8px;">
-        <label for="file-${file.name}" style="flex: 1; font-size: 12px; cursor: pointer;">
-          <span style="font-family: monospace;">${file.name}</span>
-          <span style="color: #666; margin-left: 8px;">${file.size}</span>
-          <span class="file-type-badge" style="background: ${this.getFileTypeBadgeColor(file.type)}; color: white; padding: 1px 4px; border-radius: 3px; font-size: 10px; margin-left: 4px;">
-            ${file.type}
-          </span>
-        </label>
-      </div>
-    `).join('');
-  }
-
-  getFileTypeBadgeColor(type) {
-    switch (type) {
-      case 'model': return '#ff6b35';
-      case 'config': return '#28a745';
-      default: return '#6c757d';
-    }
-  }
 
   attachDownloadHandlers() {
-    document.getElementById('download-all')?.addEventListener('click', () => {
-      this.startDownload('all');
-    });
-
-    document.getElementById('download-models-only')?.addEventListener('click', () => {
-      this.startDownload('models-only');
-    });
-
-    document.getElementById('download-selected')?.addEventListener('click', () => {
-      this.startDownload('selected');
+    document.getElementById('download-repo')?.addEventListener('click', () => {
+      this.startDownload();
     });
 
     document.getElementById('transfer-to-closed')?.addEventListener('click', () => {
@@ -169,34 +125,22 @@ class PopupManager {
     });
   }
 
-  async startDownload(type) {
+  async startDownload() {
     if (!this.currentModel) {
       this.showStatus('error', '모델 정보를 찾을 수 없습니다.');
       return;
     }
 
-    let selectedFiles = [];
+    // 서버 연결 확인
+    this.showStatus('info', '서버 연결을 확인하는 중...');
+    const serverAvailable = await this.checkServerConnection();
     
-    switch (type) {
-      case 'all':
-        selectedFiles = this.currentModel.files || [];
-        break;
-      case 'models-only':
-        selectedFiles = (this.currentModel.files || []).filter(f => f.type === 'model');
-        break;
-      case 'selected':
-        const checkboxes = document.querySelectorAll('input[type="checkbox"]:checked');
-        const selectedNames = Array.from(checkboxes).map(cb => cb.value);
-        selectedFiles = (this.currentModel.files || []).filter(f => selectedNames.includes(f.name));
-        break;
-    }
-
-    if (selectedFiles.length === 0) {
-      this.showStatus('error', '다운로드할 파일이 없습니다.');
+    if (!serverAvailable) {
+      this.showStatus('error', '❌ 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인해주세요.');
       return;
     }
 
-    this.showStatus('info', `다운로드를 시작합니다... (${selectedFiles.length}개 파일)`);
+    this.showStatus('info', `${this.currentModel.fullName} 다운로드를 시작합니다...`);
     
     // Disable download buttons
     this.setDownloadButtonsEnabled(false);
@@ -206,9 +150,7 @@ class PopupManager {
         type: 'START_DOWNLOAD',
         data: {
           modelInfo: this.currentModel,
-          selectedFiles: selectedFiles,
           options: {
-            downloadType: type,
             includeGitHistory: false
           }
         }
@@ -220,15 +162,42 @@ class PopupManager {
           status: 'started',
           progress: 0
         };
-        this.showStatus('info', '다운로드가 시작되었습니다. 서버에서 처리 중입니다...');
+        this.showStatus('info', '다운로드가 시작되었습니다. 서버에서 Git clone 진행 중입니다...');
         this.startProgressUpdates();
       } else {
-        this.showStatus('error', `다운로드 실패: ${response.error}`);
+        let errorMsg = response.error || '알 수 없는 오류';
+        if (errorMsg.includes('fetch')) {
+          errorMsg = '서버 연결 실패. 네트워크 상태를 확인해주세요.';
+        } else if (errorMsg.includes('timeout')) {
+          errorMsg = '서버 응답 시간 초과. 잠시 후 다시 시도해주세요.';
+        }
+        this.showStatus('error', `다운로드 실패: ${errorMsg}`);
         this.setDownloadButtonsEnabled(true);
       }
     } catch (error) {
-      this.showStatus('error', `오류 발생: ${error.message}`);
+      let errorMsg = error.message;
+      if (errorMsg.includes('fetch')) {
+        errorMsg = '서버 연결 실패. 서버가 실행 중인지 확인해주세요.';
+      }
+      this.showStatus('error', `오류 발생: ${errorMsg}`);
       this.setDownloadButtonsEnabled(true);
+    }
+  }
+
+  async checkServerConnection() {
+    try {
+      const result = await chrome.storage.local.get(['serverConfig']);
+      const serverConfig = result.serverConfig || { ip: '75.12.8.195', port: '8080' };
+      
+      const response = await fetch(`http://${serverConfig.ip}:${serverConfig.port}/health`, {
+        method: 'GET',
+        timeout: 5000  // 5초 타임아웃
+      });
+      
+      return response.ok;
+    } catch (error) {
+      console.log('Server connection check failed:', error);
+      return false;
     }
   }
 
@@ -261,7 +230,7 @@ class PopupManager {
       } catch (error) {
         console.error('Status update error:', error);
       }
-    }, 2000);
+    }, 1000); // 1초마다 업데이트로 실시간성 향상
 
     // Stop updates after 1 hour
     setTimeout(() => {
@@ -399,7 +368,7 @@ class PopupManager {
       } catch (error) {
         console.error('Transfer status update error:', error);
       }
-    }, 3000);
+    }, 1500); // 1.5초마다 업데이트로 전송 진행률 실시간 표시
 
     // Stop updates after 2 hours
     setTimeout(() => {
@@ -465,6 +434,24 @@ class PopupManager {
       button.disabled = !enabled;
     }
   }
+
+  async checkInitialServerStatus() {
+    const statusDiv = document.getElementById('server-status');
+    if (!statusDiv) return;
+
+    statusDiv.innerHTML = '<span style="color: #666;">🔄 서버 상태 확인 중...</span>';
+    
+    const isAvailable = await this.checkServerConnection();
+    
+    if (isAvailable) {
+      statusDiv.innerHTML = '<span style="color: #28a745;">✅ 서버 연결됨</span>';
+    } else {
+      statusDiv.innerHTML = '<span style="color: #dc3545;">❌ 서버 연결 실패</span>';
+      
+      // 다운로드 버튼 비활성화
+      this.setDownloadButtonsEnabled(false);
+    }
+  }
 }
 
 // Initialize popup when DOM is loaded
@@ -476,6 +463,6 @@ document.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('visibilitychange', async () => {
   if (!document.hidden) {
     // Popup is being shown, refresh data
-    const popup = new PopupManager();
+    new PopupManager();
   }
 });

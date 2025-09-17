@@ -32,7 +32,6 @@ class HuggingFaceParser {
         fullName: fullModelName,
         url: url,
         repoType: this.getRepoType(),
-        files: this.getFileList(),
         branch: this.getCurrentBranch(),
         description: this.getDescription()
       };
@@ -76,35 +75,6 @@ class HuggingFaceParser {
     return descElement ? descElement.textContent.trim() : '';
   }
 
-  getFileList() {
-    const files = [];
-    const fileElements = document.querySelectorAll('[data-testid="file-item"]');
-    
-    fileElements.forEach(element => {
-      const nameElement = element.querySelector('[data-testid="file-name"]');
-      const sizeElement = element.querySelector('[data-testid="file-size"]');
-      
-      if (nameElement) {
-        files.push({
-          name: nameElement.textContent.trim(),
-          size: sizeElement ? sizeElement.textContent.trim() : '',
-          type: this.getFileType(nameElement.textContent.trim())
-        });
-      }
-    });
-    
-    return files;
-  }
-
-  getFileType(filename) {
-    const ext = filename.split('.').pop().toLowerCase();
-    const modelExts = ['bin', 'safetensors', 'ckpt', 'pth', 'pt', 'h5', 'pkl', 'onnx'];
-    const configExts = ['json', 'yaml', 'yml', 'txt', 'md'];
-    
-    if (modelExts.includes(ext)) return 'model';
-    if (configExts.includes(ext)) return 'config';
-    return 'other';
-  }
 }
 
 // URL 변경 감지를 위한 observer

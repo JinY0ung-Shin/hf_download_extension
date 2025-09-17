@@ -1,0 +1,16 @@
+[project]
+name = "hf-model-downloader"
+version = "1.0.0"
+description = "HuggingFace Model Downloader Server - Download models to closed networks"
+authors = [
+    {name = "JinYoung Shin"}
+]
+requires-python = ">=3.8"
+dependencies = [
+    "flask>=2.3.0",
+    "flask-cors>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/JinY0ung-Shin/hf_download_extension"
+Repository = "https://github.com/JinY0ung-Shin/hf_download_extension.git"

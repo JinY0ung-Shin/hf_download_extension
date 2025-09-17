@@ -5,9 +5,7 @@
   "description": "Automatically download HuggingFace models to the company server",
   "permissions": [
     "activeTab",
-    "storage",
-    "http://75.12.8.195/*",
-    "https://huggingface.co/*"
+    "storage"
   ],
   "host_permissions": [
     "https://huggingface.co/*",
@@ -26,10 +24,5 @@
   },
   "background": {
     "service_worker": "background.js"
-  },
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
   }
 }
