@@ -189,57 +189,24 @@ class PopupController {
                 }
 
                 if (progress.status === 'cloning') {
-                    downloadBtn.innerHTML = `
-                        <div class="spinner"></div>
-                        Downloading... ${progress.progress}%
-                        ${this.renderSizeLabel(progress)}
-                    `;
-                    this.updateProgress(progress.progress);
+                    this.applyProgressState(downloadBtn, progress);
                     this.addLogEntry(`Git clone progress: ${progress.progress}%`, 'info');
                     setTimeout(poll, pollInterval);
                 } else if (progress.status === 'clone_complete') {
-                    downloadBtn.innerHTML = `
-                        <div class="spinner"></div>
-                        Preparing transfer...
-                        ${this.renderSizeLabel(progress)}
-                    `;
-                    this.updateProgress(90);
+                    this.applyProgressState(downloadBtn, progress);
                     this.addLogEntry('Git clone completed, preparing transfer...', 'info');
                     setTimeout(poll, pollInterval);
                 } else if (progress.status === 'transferring') {
-                    downloadBtn.innerHTML = `
-                        <div class="spinner"></div>
-                        Transferring to server...
-                        ${this.renderSizeLabel(progress)}
-                    `;
-                    this.updateProgress(95);
+                    this.applyProgressState(downloadBtn, progress);
                     this.addLogEntry('Transferring files to supercomputer...', 'info');
                     setTimeout(poll, pollInterval);
                 } else if (progress.status === 'transfer_complete') {
-                    this.updateProgress(100);
+                    this.applyProgressState(downloadBtn, progress);
                     this.addLogEntry('Download completed successfully!', 'success');
-
-                    downloadBtn.innerHTML = `
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polyline points="20,6 9,17 4,12"/>
-                        </svg>
-                        Download Complete!
-                        ${this.renderSizeLabel(progress)}
-                    `;
-                    downloadBtn.className = 'download-btn success';
                     this.downloadInProgress = false;
                 } else if (progress.status === 'exists') {
-                    this.updateProgress(100);
+                    this.applyProgressState(downloadBtn, progress);
                     this.addLogEntry('Model already exists on supercomputer', 'success');
-
-                    downloadBtn.innerHTML = `
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polyline points="20,6 9,17 4,12"/>
-                        </svg>
-                        Already Downloaded
-                        ${this.renderSizeLabel(progress)}
-                    `;
-                    downloadBtn.className = 'download-btn success';
                     this.downloadInProgress = false;
                 } else if (progress.status === 'error') {
                     this.addLogEntry(`Error: ${progress.message}`, 'error');
@@ -321,6 +288,8 @@ class PopupController {
                 logSection.style.display = 'block';
 
                 this.addLogEntry('Resuming ongoing download...', 'info');
+                this.updateSizeInfo(progress);
+                this.applyProgressState(downloadBtn, progress);
                 await this.pollProgress(downloadBtn);
             }
         } catch (error) {
@@ -391,6 +360,75 @@ class PopupController {
         const sizeInfo = document.getElementById('size-info');
         sizeInfo.style.display = 'none';
         sizeInfo.textContent = '';
+    }
+
+    applyProgressState(downloadBtn, progress) {
+        const status = progress.status;
+
+        if (status === 'cloning') {
+            const parsedPercent = Number(progress.progress);
+            const percent = Number.isFinite(parsedPercent) ? parsedPercent : 0;
+            downloadBtn.innerHTML = `
+                <div class="spinner"></div>
+                Downloading... ${percent}%
+                ${this.renderSizeLabel(progress)}
+            `;
+            downloadBtn.disabled = true;
+            downloadBtn.className = 'download-btn';
+            this.updateProgress(percent);
+            return;
+        }
+
+        if (status === 'clone_complete') {
+            downloadBtn.innerHTML = `
+                <div class="spinner"></div>
+                Preparing transfer...
+                ${this.renderSizeLabel(progress)}
+            `;
+            downloadBtn.disabled = true;
+            downloadBtn.className = 'download-btn';
+            this.updateProgress(90);
+            return;
+        }
+
+        if (status === 'transferring') {
+            downloadBtn.innerHTML = `
+                <div class="spinner"></div>
+                Transferring to server...
+                ${this.renderSizeLabel(progress)}
+            `;
+            downloadBtn.disabled = true;
+            downloadBtn.className = 'download-btn';
+            this.updateProgress(95);
+            return;
+        }
+
+        if (status === 'transfer_complete') {
+            this.updateProgress(100);
+            downloadBtn.innerHTML = `
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="20,6 9,17 4,12"/>
+                </svg>
+                Download Complete!
+                ${this.renderSizeLabel(progress)}
+            `;
+            downloadBtn.className = 'download-btn success';
+            downloadBtn.disabled = true;
+            return;
+        }
+
+        if (status === 'exists') {
+            this.updateProgress(100);
+            downloadBtn.innerHTML = `
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="20,6 9,17 4,12"/>
+                </svg>
+                Already Downloaded
+                ${this.renderSizeLabel(progress)}
+            `;
+            downloadBtn.className = 'download-btn success';
+            downloadBtn.disabled = true;
+        }
     }
 }
 
