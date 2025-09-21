@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -432,6 +432,10 @@ class DownloadProxyServer:
 
             self.update_progress(progress_key, "transferring", "Starting SCP transfer to supercomputer...", 0)
 
+            removed_git = self.remove_git_directory(local_path)
+            if removed_git:
+                self.update_progress(progress_key, "transferring", "Removed .git directory before transfer")
+
             cmd = [
                 "scp", "-r",
                 local_path,
@@ -442,11 +446,56 @@ class DownloadProxyServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            _, stderr = await process.communicate()
 
-            if process.returncode != 0:
+            captured_logs: List[str] = []
+
+            async def relay_stream(stream: asyncio.StreamReader, label: str):
+                buffer = ""
+                while True:
+                    chunk = await stream.read(1024)
+                    if not chunk:
+                        break
+                    decoded = chunk.decode(errors="ignore")
+                    buffer += decoded
+
+                    # Split on both newlines and carriage returns to handle scp progress output
+                    while True:
+                        split_index = min(
+                            (idx for idx in (
+                                buffer.find("\n"),
+                                buffer.find("\r")
+                            ) if idx != -1),
+                            default=-1
+                        )
+
+                        if split_index == -1:
+                            break
+
+                        line = buffer[:split_index]
+                        buffer = buffer[split_index + 1:]
+
+                        clean_line = line.strip()
+                        if clean_line:
+                            print(f"SCP {label}: {clean_line}")
+                            captured_logs.append(clean_line)
+                            self.update_progress(progress_key, "transferring", clean_line)
+
+                if buffer.strip():
+                    clean_line = buffer.strip()
+                    print(f"SCP {label}: {clean_line}")
+                    captured_logs.append(clean_line)
+                    self.update_progress(progress_key, "transferring", clean_line)
+
+            stdout_task = asyncio.create_task(relay_stream(process.stdout, "stdout"))
+            stderr_task = asyncio.create_task(relay_stream(process.stderr, "stderr"))
+
+            await asyncio.gather(stdout_task, stderr_task)
+            return_code = await process.wait()
+
+            if return_code != 0:
                 self.update_progress(progress_key, "error", "SCP transfer failed", 0)
-                raise Exception(f"SCP transfer failed: {stderr.decode()}")
+                combined_logs = "\n".join(captured_logs)
+                raise Exception(f"SCP transfer failed with exit code {return_code}: {combined_logs}")
 
             self.update_progress(progress_key, "transfer_complete", "SCP transfer completed", 100)
             self.cleanup_completed_progress(progress_key)
@@ -462,6 +511,23 @@ class DownloadProxyServer:
                 shutil.rmtree(local_path)
         except Exception as e:
             print(f"Warning: Failed to cleanup local files: {e}")
+
+    def remove_git_directory(self, repo_path: str):
+        """Delete the .git directory before transfer to reduce payload size."""
+        try:
+            git_dir = Path(repo_path) / ".git"
+            # Only delete if the path lives under our managed download root
+            if git_dir.exists() and git_dir.is_dir():
+                git_dir_relative = git_dir.resolve().relative_to(self.local_download_path.resolve())
+                print(f"Removing git metadata: {git_dir}")
+                shutil.rmtree(git_dir)
+                return str(git_dir_relative)
+        except ValueError:
+            # Path is outside our managed download directory; skip removal for safety
+            print(f"Skipping .git removal for unmanaged path: {repo_path}")
+        except Exception as e:
+            print(f"Warning: Failed to remove .git directory: {e}")
+        return None
 
 proxy_server = DownloadProxyServer()
 
