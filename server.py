@@ -6,11 +6,14 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
+from huggingface_hub import HfApi
+from huggingface_hub.utils import HfHubHTTPError
 
 load_dotenv()
 
@@ -41,6 +44,8 @@ class DownloadProxyServer:
         self.supercomputer_host = os.getenv("SUPERCOMPUTER_HOST")
         self.supercomputer_user = os.getenv("SUPERCOMPUTER_USER")
         self.supercomputer_path = os.getenv("SUPERCOMPUTER_PATH")
+        self.hf_token = os.getenv("HUGGINGFACE_TOKEN")
+        self.hf_api = HfApi(token=self.hf_token) if self.hf_token else HfApi()
 
         # Create local download directory if it doesn't exist
         self.local_download_path.mkdir(parents=True, exist_ok=True)
@@ -74,14 +79,37 @@ class DownloadProxyServer:
         except Exception as e:
             print(f"Failed to save progress file: {e}")
 
-    def update_progress(self, key: str, status: str, message: str, progress: int = 0):
+    def update_progress(
+        self,
+        key: str,
+        status: str,
+        message: str,
+        progress: Optional[int] = None,
+        *,
+        downloaded_bytes: Optional[int] = None,
+        total_bytes: Optional[int] = None
+    ):
         """Update download progress"""
-        self.download_progress[key] = {
+
+        current_entry = self.download_progress.get(key, {})
+
+        if progress is None:
+            progress = current_entry.get("progress", 0)
+
+        updated_entry = {
+            **current_entry,
             "status": status,
             "message": message,
             "progress": progress,
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
+
+        if downloaded_bytes is not None:
+            updated_entry["downloaded_bytes"] = downloaded_bytes
+        if total_bytes is not None:
+            updated_entry["total_bytes"] = total_bytes
+
+        self.download_progress[key] = updated_entry
         print(f"Progress update [{key}]: {status} - {message} ({progress}%)")
 
         # Save to file
@@ -101,27 +129,143 @@ class DownloadProxyServer:
         # Run cleanup in background
         asyncio.create_task(delayed_cleanup())
 
-    async def simulate_progress_if_needed(self, progress_key: str):
-        """Simulate progress if no real progress is detected from git"""
-        await asyncio.sleep(5)  # Wait 5 seconds before starting simulation
+    async def get_repo_total_size(self, author: str, repo_name: str) -> Optional[int]:
+        """Fetch total repository size from HuggingFace Hub metadata."""
+        repo_id = f"{author}/{repo_name}"
 
-        progress = self.download_progress.get(progress_key, {})
-        if progress.get('progress', 0) <= 5:  # If still very low progress after 5 seconds
-            print(f"Starting progress simulation for {progress_key}")
+        def _fetch_size():
+            try:
+                info = self.hf_api.model_info(repo_id, files_metadata=True)
+                total = 0
+                if hasattr(info, "siblings"):
+                    for sibling in info.siblings:
+                        if sibling.size is not None:
+                            total += sibling.size
+                return total or None
+            except HfHubHTTPError as err:
+                if getattr(err, "response", None) is not None and err.response.status_code == 404:
+                    return None
+                print(f"HuggingFace API error when fetching {repo_id}: {err}")
+                return None
+            except Exception as err:
+                print(f"Failed to fetch repo size for {repo_id}: {err}")
+                return None
 
-            # Gradually increase progress
-            for i in range(10, 80, 5):  # 10% to 75% in 5% increments
-                if progress_key not in self.download_progress:
-                    break  # Download was cancelled/completed
+        return await asyncio.to_thread(_fetch_size)
 
-                current_progress = self.download_progress.get(progress_key, {})
-                if current_progress.get('status') != 'cloning':
-                    break  # Status changed, stop simulation
+    def get_directory_size(self, path: Path) -> int:
+        """Calculate total size of files within the given directory."""
+        if not path.exists():
+            return 0
 
-                if current_progress.get('progress', 0) < i:  # Only update if real progress hasn't overtaken
-                    self.update_progress(progress_key, "cloning", f"Downloading files... (estimated {i}%)", i)
+        total = 0
+        for root, _, files in os.walk(path):
+            for file_name in files:
+                file_path = Path(root) / file_name
+                try:
+                    total += file_path.stat().st_size
+                except OSError:
+                    continue
+        return total
 
-                await asyncio.sleep(3)  # Update every 3 seconds
+    def format_bytes(self, size: int) -> str:
+        """Human readable byte formatter."""
+        if size is None:
+            return "0 B"
+        step_unit = 1024
+        units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
+        idx = 0
+        value = float(size)
+        while value >= step_unit and idx < len(units) - 1:
+            value /= step_unit
+            idx += 1
+        return f"{value:.2f} {units[idx]}"
+
+    async def monitor_download_progress(
+        self,
+        repo_path: Path,
+        progress_key: str,
+        expected_total: Optional[int],
+        stop_event: asyncio.Event,
+        interval_seconds: float = 2.0
+    ):
+        """Monitor local repo size and update progress based on actual bytes."""
+
+        last_reported_size = -1
+
+        while True:
+            size_bytes = await asyncio.to_thread(self.get_directory_size, repo_path)
+
+            if size_bytes != last_reported_size:
+                message: str
+                progress_value: Optional[int] = None
+
+                if expected_total and expected_total > 0:
+                    clamped = min(size_bytes, expected_total)
+                    ratio = clamped / expected_total
+                    progress_value = min(99, int(ratio * 100))
+                    message = (
+                        f"Downloading files... {self.format_bytes(size_bytes)} / "
+                        f"{self.format_bytes(expected_total)}"
+                    )
+                else:
+                    message = f"Downloading files... {self.format_bytes(size_bytes)}"
+
+                if progress_value is None:
+                    current = self.download_progress.get(progress_key, {})
+                    current_progress = current.get("progress", 0)
+                    if size_bytes > 0:
+                        progress_value = min(99, max(current_progress, 1))
+                    else:
+                        progress_value = current_progress
+
+                self.update_progress(
+                    progress_key,
+                    "cloning",
+                    message,
+                    progress_value,
+                    downloaded_bytes=size_bytes
+                )
+                last_reported_size = size_bytes
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+                break
+            except asyncio.TimeoutError:
+                continue
+
+        # Final size update after clone completes
+        final_size = await asyncio.to_thread(self.get_directory_size, repo_path)
+        if final_size != last_reported_size:
+            message: str
+            progress_value: Optional[int] = None
+
+            if expected_total and expected_total > 0:
+                clamped = min(final_size, expected_total)
+                ratio = clamped / expected_total
+                progress_value = min(99, int(ratio * 100))
+                message = (
+                    f"Downloading files... {self.format_bytes(final_size)} / "
+                    f"{self.format_bytes(expected_total)}"
+                )
+            else:
+                message = f"Downloading files... {self.format_bytes(final_size)}"
+
+            if progress_value is None:
+                current = self.download_progress.get(progress_key, {})
+                current_progress = current.get("progress", 0)
+                if final_size > 0:
+                    progress_value = min(99, max(current_progress, 1))
+                else:
+                    progress_value = current_progress
+
+            self.update_progress(
+                progress_key,
+                "cloning",
+                message,
+                progress_value,
+                downloaded_bytes=final_size
+            )
 
     def check_if_exists_on_supercomputer(self, author: str, repo_name: str) -> bool:
         """Check if model already exists on supercomputer"""
@@ -149,10 +293,20 @@ class DownloadProxyServer:
         print(f"Repository URL: {repo_url}")
         print(f"Local path: {local_repo_path}")
 
-        self.update_progress(progress_key, "cloning", "Starting git clone...", 0)
+        expected_total_size = await self.get_repo_total_size(author, repo_name)
+        if expected_total_size:
+            print(f"Estimated repository size: {expected_total_size} bytes")
+        else:
+            print("Repository size metadata unavailable; tracking progress using downloaded bytes only.")
 
-        # Start a background task to simulate progress if no real progress is detected
-        progress_simulation_task = asyncio.create_task(self.simulate_progress_if_needed(progress_key))
+        self.update_progress(
+            progress_key,
+            "cloning",
+            "Starting git clone...",
+            0,
+            total_bytes=expected_total_size,
+            downloaded_bytes=0
+        )
 
         # Remove existing directory if it exists
         if local_repo_path.exists():
@@ -160,91 +314,81 @@ class DownloadProxyServer:
             shutil.rmtree(local_repo_path)
 
         try:
-            cmd = ["git", "clone", "--progress", repo_url, str(local_repo_path)]
-            print(f"Executing command: {' '.join(cmd)}")
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE  # Keep stderr separate to capture git progress
+            stop_event = asyncio.Event()
+            monitor_task = asyncio.create_task(
+                self.monitor_download_progress(local_repo_path, progress_key, expected_total_size, stop_event)
             )
 
-            # Read stderr (git progress) and stdout separately
-            async def read_progress():
-                import re
-                if process.stderr:
-                    async for line in process.stderr:
-                        progress_line = line.decode().strip()
-                        if progress_line:
-                            print(f"Git clone progress: {progress_line}")
+            process = None
+            stderr_task = None
+            stdout_task = None
+            success = False
 
-                            # Parse git progress - git uses different formats
-                            if "Receiving objects:" in progress_line or "remote: Counting objects:" in progress_line:
-                                # Look for percentage pattern
-                                match = re.search(r'(\d+)%', progress_line)
-                                if match:
-                                    percentage = int(match.group(1))
-                                    self.update_progress(progress_key, "cloning", f"Downloading files... ({percentage}%)", percentage)
-                                else:
-                                    # If no percentage found, estimate based on activity
-                                    self.update_progress(progress_key, "cloning", "Downloading files...", 25)
-                            elif "Resolving deltas:" in progress_line:
-                                match = re.search(r'(\d+)%', progress_line)
-                                if match:
-                                    percentage = int(match.group(1))
-                                    self.update_progress(progress_key, "cloning", f"Processing files... ({percentage}%)", 80 + (percentage // 5))
-                                else:
-                                    self.update_progress(progress_key, "cloning", "Processing files...", 85)
-                            elif "Checking out files:" in progress_line:
-                                match = re.search(r'(\d+)%', progress_line)
-                                if match:
-                                    percentage = int(match.group(1))
-                                    self.update_progress(progress_key, "cloning", f"Checking out files... ({percentage}%)", 90 + (percentage // 10))
-                                else:
-                                    self.update_progress(progress_key, "cloning", "Checking out files...", 95)
-                            elif any(keyword in progress_line.lower() for keyword in ["cloning", "unpacking", "counting"]):
-                                # General git activity - show some progress
-                                self.update_progress(progress_key, "cloning", f"Git clone: {progress_line}", 10)
-
-            # Start reading progress in background
-            progress_task = asyncio.create_task(read_progress())
-
-            # Also read stdout for any error messages
-            stdout_data = b''
-            if process.stdout:
-                async for line in process.stdout:
-                    stdout_data += line
-                    stdout_line = line.decode().strip()
-                    if stdout_line:
-                        print(f"Git clone stdout: {stdout_line}")
-
-            # Wait for process to complete
-            await process.wait()
-
-            # Cancel progress reading and simulation
-            progress_task.cancel()
-            progress_simulation_task.cancel()
             try:
-                await progress_task
-            except asyncio.CancelledError:
-                pass
-            try:
-                await progress_simulation_task
-            except asyncio.CancelledError:
-                pass
+                cmd = ["git", "clone", "--progress", repo_url, str(local_repo_path)]
+                print(f"Executing command: {' '.join(cmd)}")
 
-            if process.returncode != 0:
-                self.update_progress(progress_key, "error", "Git clone failed", 0)
-                raise Exception(f"Git clone failed with return code {process.returncode}")
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+
+                async def relay_stream(stream, label: str):
+                    if not stream:
+                        return
+                    async for line in stream:
+                        text = line.decode().strip()
+                        if text:
+                            print(f"Git clone {label}: {text}")
+
+                stderr_task = asyncio.create_task(relay_stream(process.stderr, "stderr"))
+                stdout_task = asyncio.create_task(relay_stream(process.stdout, "stdout"))
+
+                await process.wait()
+                success = process.returncode == 0
+
+            finally:
+                stop_event.set()
+
+                for task in (stderr_task, stdout_task):
+                    if task:
+                        task.cancel()
+                await asyncio.gather(
+                    *(task for task in (stderr_task, stdout_task) if task),
+                    return_exceptions=True
+                )
+
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
+
+            if not success:
+                raise Exception("Git clone failed")
+
+            final_size = await asyncio.to_thread(self.get_directory_size, local_repo_path)
+            current_entry = self.download_progress.get(progress_key, {})
+            total_bytes = current_entry.get("total_bytes")
+
+            if total_bytes and total_bytes > 0:
+                final_message = (
+                    f"Clone complete: {self.format_bytes(final_size)} / {self.format_bytes(total_bytes)}"
+                )
+            else:
+                final_message = f"Clone complete: {self.format_bytes(final_size)}"
 
             print(f"Git clone completed successfully: {local_repo_path}")
-            self.update_progress(progress_key, "clone_complete", "Git clone completed", 100)
+            self.update_progress(
+                progress_key,
+                "clone_complete",
+                final_message,
+                100,
+                downloaded_bytes=final_size
+            )
             return str(local_repo_path)
         except Exception as e:
             print(f"Git clone error: {e}")
-            # Cancel simulation on error
-            if 'progress_simulation_task' in locals():
-                progress_simulation_task.cancel()
             self.update_progress(progress_key, "error", f"Git clone failed: {str(e)}", 0)
             raise Exception(f"Failed to clone repository: {e}")
 
