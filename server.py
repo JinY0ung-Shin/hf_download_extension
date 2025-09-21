@@ -87,7 +87,9 @@ class DownloadProxyServer:
         progress: Optional[int] = None,
         *,
         downloaded_bytes: Optional[int] = None,
-        total_bytes: Optional[int] = None
+        total_bytes: Optional[int] = None,
+        log_type: Optional[str] = None,
+        append_log: bool = True
     ):
         """Update download progress"""
 
@@ -95,6 +97,11 @@ class DownloadProxyServer:
 
         if progress is None:
             progress = current_entry.get("progress", 0)
+
+        logs = list(current_entry.get("logs", []))
+        normalized_message = None
+        if isinstance(message, str):
+            normalized_message = message.strip()
 
         updated_entry = {
             **current_entry,
@@ -108,6 +115,34 @@ class DownloadProxyServer:
             updated_entry["downloaded_bytes"] = downloaded_bytes
         if total_bytes is not None:
             updated_entry["total_bytes"] = total_bytes
+
+        if append_log and normalized_message:
+            inferred_type = log_type
+            if inferred_type is None:
+                if status in {"transfer_complete", "exists"}:
+                    inferred_type = "success"
+                elif status == "error":
+                    inferred_type = "error"
+                else:
+                    inferred_type = "info"
+
+            last_message = logs[-1]["message"] if logs else None
+            if normalized_message != last_message:
+                logs.append(
+                    {
+                        "message": normalized_message,
+                        "type": inferred_type,
+                        "timestamp": time.time(),
+                    }
+                )
+
+        if len(logs) > 200:
+            logs = logs[-200:]
+
+        if logs:
+            updated_entry["logs"] = logs
+        else:
+            updated_entry.pop("logs", None)
 
         self.download_progress[key] = updated_entry
         print(f"Progress update [{key}]: {status} - {message} ({progress}%)")
@@ -297,6 +332,11 @@ class DownloadProxyServer:
         print(f"Repository URL: {repo_url}")
         print(f"Local path: {local_repo_path}")
 
+        if progress_key in self.download_progress:
+            print(f"Resetting existing progress entry for {progress_key}")
+            del self.download_progress[progress_key]
+            self.save_progress_to_file()
+
         expected_total_size = await self.get_repo_total_size(author, repo_name)
         if expected_total_size:
             print(f"Estimated repository size: {expected_total_size} bytes")
@@ -441,56 +481,76 @@ class DownloadProxyServer:
                 local_path,
                 f"{remote_path}{repo_name}"
             ]
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
 
+            master_fd, slave_fd = os.openpty()
             captured_logs: List[str] = []
 
-            async def relay_stream(stream: asyncio.StreamReader, label: str):
+            async def read_pty_output():
                 buffer = ""
-                while True:
-                    chunk = await stream.read(1024)
-                    if not chunk:
-                        break
-                    decoded = chunk.decode(errors="ignore")
-                    buffer += decoded
+                loop = asyncio.get_running_loop()
 
-                    # Split on both newlines and carriage returns to handle scp progress output
+                try:
                     while True:
-                        split_index = min(
-                            (idx for idx in (
-                                buffer.find("\n"),
-                                buffer.find("\r")
-                            ) if idx != -1),
-                            default=-1
-                        )
-
-                        if split_index == -1:
+                        chunk = await loop.run_in_executor(None, os.read, master_fd, 1024)
+                        if not chunk:
                             break
 
-                        line = buffer[:split_index]
-                        buffer = buffer[split_index + 1:]
+                        decoded = chunk.decode(errors="ignore")
+                        buffer += decoded
 
-                        clean_line = line.strip()
-                        if clean_line:
-                            print(f"SCP {label}: {clean_line}")
-                            captured_logs.append(clean_line)
-                            self.update_progress(progress_key, "transferring", clean_line)
+                        while True:
+                            candidates = [idx for idx in (
+                                buffer.find("\n"),
+                                buffer.find("\r")
+                            ) if idx != -1]
 
-                if buffer.strip():
-                    clean_line = buffer.strip()
-                    print(f"SCP {label}: {clean_line}")
-                    captured_logs.append(clean_line)
-                    self.update_progress(progress_key, "transferring", clean_line)
+                            if not candidates:
+                                break
 
-            stdout_task = asyncio.create_task(relay_stream(process.stdout, "stdout"))
-            stderr_task = asyncio.create_task(relay_stream(process.stderr, "stderr"))
+                            split_index = min(candidates)
+                            line = buffer[:split_index]
+                            buffer = buffer[split_index + 1:]
 
-            await asyncio.gather(stdout_task, stderr_task)
+                            clean_line = line.strip()
+                            if clean_line:
+                                print(f"SCP PTY: {clean_line}")
+                                captured_logs.append(clean_line)
+                                self.update_progress(
+                                    progress_key,
+                                    "transferring",
+                                    clean_line,
+                                    log_type="info"
+                                )
+
+                    if buffer.strip():
+                        clean_line = buffer.strip()
+                        print(f"SCP PTY: {clean_line}")
+                        captured_logs.append(clean_line)
+                        self.update_progress(
+                            progress_key,
+                            "transferring",
+                            clean_line,
+                            log_type="info"
+                        )
+                finally:
+                    os.close(master_fd)
+
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd
+                )
+            except Exception:
+                os.close(master_fd)
+                raise
+            finally:
+                os.close(slave_fd)
+
+            reader_task = asyncio.create_task(read_pty_output())
             return_code = await process.wait()
+            await reader_task
 
             if return_code != 0:
                 self.update_progress(progress_key, "error", "SCP transfer failed", 0)

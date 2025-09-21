@@ -5,6 +5,7 @@ class PopupController {
         this.repoInfo = null;
         this.serverOnline = false;
         this.downloadInProgress = false;
+        this.logCursor = 0;
         this.init();
     }
 
@@ -129,9 +130,11 @@ class PopupController {
         if (!this.repoInfo || !this.serverOnline || this.downloadInProgress) return;
 
         this.downloadInProgress = true;
+        this.logCursor = 0;
         const downloadBtn = document.getElementById('download-btn');
         const progressBar = document.getElementById('progress-bar');
         const logSection = document.getElementById('log-section');
+        this.clearLogSection();
         this.resetSizeInfo();
 
         // Update UI
@@ -179,38 +182,56 @@ class PopupController {
                 const response = await fetch(`http://localhost:8000/progress/${this.repoInfo.author}/${this.repoInfo.repo_name}`);
                 const progress = await response.json();
                 this.updateSizeInfo(progress);
+                const hadNewLogs = this.processProgressLogs(progress);
 
                 if (progress.status === 'not_found' && pollCount < 5) {
                     // Still initializing, continue polling
+                    if (pollCount === 0) {
+                        this.addLogEntry('Initializing download...', 'info');
+                    }
                     pollCount++;
-                    this.addLogEntry('Initializing download...', 'info');
                     setTimeout(poll, pollInterval);
                     return;
                 }
 
                 if (progress.status === 'cloning') {
                     this.applyProgressState(downloadBtn, progress);
-                    this.addLogEntry(`Git clone progress: ${progress.progress}%`, 'info');
+                    if (!hadNewLogs) {
+                        const hasPercent = progress.progress !== undefined && progress.progress !== null;
+                        const fallback = hasPercent ? `Git clone progress: ${progress.progress}%` : 'Cloning repository...';
+                        this.addLogEntry(fallback, 'info');
+                    }
                     setTimeout(poll, pollInterval);
                 } else if (progress.status === 'clone_complete') {
                     this.applyProgressState(downloadBtn, progress);
-                    this.addLogEntry('Git clone completed, preparing transfer...', 'info');
+                    if (!hadNewLogs) {
+                        this.addLogEntry('Git clone completed, preparing transfer...', 'info');
+                    }
                     setTimeout(poll, pollInterval);
                 } else if (progress.status === 'transferring') {
                     this.applyProgressState(downloadBtn, progress);
-                    this.addLogEntry('Transferring files to supercomputer...', 'info');
+                    if (!hadNewLogs) {
+                        this.addLogEntry('Transferring files to supercomputer...', 'info');
+                    }
                     setTimeout(poll, pollInterval);
                 } else if (progress.status === 'transfer_complete') {
                     this.applyProgressState(downloadBtn, progress);
-                    this.addLogEntry('Download completed successfully!', 'success');
+                    if (!hadNewLogs) {
+                        this.addLogEntry('Download completed successfully!', 'success');
+                    }
                     this.downloadInProgress = false;
                 } else if (progress.status === 'exists') {
                     this.applyProgressState(downloadBtn, progress);
-                    this.addLogEntry('Model already exists on supercomputer', 'success');
+                    if (!hadNewLogs) {
+                        this.addLogEntry('Model already exists on supercomputer', 'success');
+                    }
                     this.downloadInProgress = false;
                 } else if (progress.status === 'error') {
-                    this.addLogEntry(`Error: ${progress.message}`, 'error');
-                    this.showDownloadError(downloadBtn, progress.message);
+                    const fallback = progress.message ? `Error: ${progress.message}` : 'An error occurred during download';
+                    if (!hadNewLogs) {
+                        this.addLogEntry(fallback, 'error');
+                    }
+                    this.showDownloadError(downloadBtn, progress.message || fallback);
                 } else if (pollCount < maxPolls) {
                     // Continue polling
                     pollCount++;
@@ -287,6 +308,9 @@ class PopupController {
                 progressBar.style.display = 'block';
                 logSection.style.display = 'block';
 
+                this.clearLogSection();
+                this.logCursor = 0;
+                this.processProgressLogs(progress);
                 this.addLogEntry('Resuming ongoing download...', 'info');
                 this.updateSizeInfo(progress);
                 this.applyProgressState(downloadBtn, progress);
@@ -312,6 +336,36 @@ class PopupController {
 
         logSection.appendChild(logEntry);
         logSection.scrollTop = logSection.scrollHeight;
+    }
+
+    clearLogSection() {
+        const logSection = document.getElementById('log-section');
+        if (logSection) {
+            logSection.innerHTML = '';
+        }
+    }
+
+    processProgressLogs(progress) {
+        const logEntries = Array.isArray(progress?.logs) ? progress.logs : null;
+        if (!logEntries || logEntries.length === 0) {
+            return false;
+        }
+
+        if (this.logCursor > logEntries.length) {
+            this.logCursor = 0;
+        }
+
+        let appended = false;
+        for (let idx = this.logCursor; idx < logEntries.length; idx += 1) {
+            const entry = logEntries[idx];
+            if (!entry || !entry.message) continue;
+            const type = entry.type || 'info';
+            this.addLogEntry(entry.message, type);
+            appended = true;
+        }
+
+        this.logCursor = logEntries.length;
+        return appended;
     }
 
     formatBytes(bytes) {

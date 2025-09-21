@@ -6,8 +6,7 @@
   "permissions": [
     "activeTab",
     "tabs",
-    "storage",
-    "notifications"
+    "storage"
   ],
   "host_permissions": [
     "https://huggingface.co/*",

@@ -3,7 +3,7 @@
 Simple script to create basic extension icons using PIL
 """
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import os
 
 def create_icon(size, output_path):
