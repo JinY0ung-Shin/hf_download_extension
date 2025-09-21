@@ -1,531 +1,189 @@
 # HuggingFace Model Downloader Chrome Extension
 
-회사 폐쇄망 환경에서 HuggingFace 모델을 자동으로 다운로드하는 Chrome 확장 프로그램입니다.
+HuggingFace 레포지토리에서 모델을 자동으로 다운로드하고 슈퍼컴 서버로 전송하는 크롬 확장 프로그램입니다.
 
 ## 기능
 
-- HuggingFace 모델 페이지 자동 감지
-- 서버를 통한 Git clone 기반 자동 다운로드
-- **단순화된 UI**: 원클릭 레포지토리 다운로드
-- **실시간 진행률 표시**: Git clone 및 전송 과정을 실시간 파싱
-- **서버 연결 상태 확인**: 팝업 열 때 자동 서버 상태 표시
-- **폐쇄망 자동 전송** (SCP/rsync 지원)
-- **한국어 에러 메시지**: 사용자 친화적 오류 안내
+- **자동 HuggingFace 감지**: `https://huggingface.co/{author}/{repo_name}` 패턴의 URL에서만 활성화
+- **원클릭 다운로드**: Chrome extension을 통한 간편한 다운로드 요청
+- **자동 서버 전송**: 다운로드 완료 후 슈퍼컴 서버로 자동 SCP 전송
+- **중복 방지**: 이미 다운로드된 모델 감지 및 알림
+- **자동 정리**: 전송 완료 후 로컬 임시 파일 자동 삭제
 
-## 설치 및 설정 가이드
+## 아키텍처
 
-### 1. 서버 설치 및 설정 (75.12.8.195에서 실행)
+```
+[Chrome Extension] → [Download Proxy Server] → [Supercomputer Server]
+     (감지/요청)        (git clone + scp)           (최종 저장)
+```
 
-#### 자동 설치 (권장)
+### Chrome Extension
+- HuggingFace URL 패턴 감지
+- 레포지토리 정보 추출 (author, repo_name)
+- Download Proxy 서버에 API 요청
+
+### Download Proxy Server
+- FastAPI 기반 REST API 서버
+- Git clone을 통한 HuggingFace 모델 다운로드
+- SCP를 통한 슈퍼컴 서버 전송
+- 경로: `{SUPERCOMPUTER_PATH}/{author}/{repo_name}`
+
+## 설치 및 실행
+
+### 1. 환경 설정
 ```bash
-# 1. 서버에 파일 업로드 후
-chmod +x install_server.sh
-./install_server.sh
+# 의존성 설치
+uv sync
 
-# 2. 서비스 시작
-sudo systemctl start hf-downloader
-sudo systemctl status hf-downloader
-
-# 3. 방화벽 설정 (필요한 경우)
-sudo ufw allow 8080
+# 환경변수 설정 (.env 파일 수정)
+# SUPERCOMPUTER_HOST, SUPERCOMPUTER_USER 등 실제 값으로 설정
 ```
 
-#### 수동 설치
-
-**방법 1: uv 사용 (권장)**
+### 2. SSH 키 인증 설정
 ```bash
-# 필수 패키지 설치
-sudo apt-get update
-sudo apt-get install -y git curl
+# SSH 키가 없는 경우 생성
+ssh-keygen -t rsa -b 4096
 
-# uv 설치 (Python 패키지 관리자)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# 공개키를 대상 서버에 복사 (로컬 테스트의 경우)
+ssh-copy-id username@hostname
 
-# 의존성 설치 및 서버 실행
-uv run python server_example.py
+# 비밀번호 없이 SSH 접속 확인
+ssh username@hostname 'echo "SSH key auth test"'
 ```
 
-**방법 2: 전통적인 pip 방식**
+### 3. 서버 실행
 ```bash
-# 필수 패키지 설치
-sudo apt-get update
-sudo apt-get install -y python3 python3-pip git curl
-
-# Python 가상환경 생성
-python3 -m venv venv
-source venv/bin/activate
-
-# Python 패키지 설치
-pip install flask flask-cors
-
-# 서버 실행
-python server_example.py
+uv run python server.py
 ```
 
-#### 폐쇄망 설정
-`server_example.py` 파일의 `CLOSED_NETWORK_CONFIG` 수정:
-```python
-CLOSED_NETWORK_CONFIG = {
-    "host": "192.168.1.100",        # 폐쇄망 서버 IP
-    "port": 22,                     # SSH 포트
-    "username": "transfer_user",    # SSH 사용자명
-    "target_path": "/opt/models/",  # 대상 디렉토리
-    "use_scp": True                # SCP 사용 (False면 rsync)
-}
-```
-
-#### SSH 키 설정 (비밀번호 없는 로그인)
-```bash
-# 1. SSH 키 생성 (75.12.8.195에서)
-ssh-keygen -t rsa -b 4096 -f ~/.ssh/transfer_key
-
-# 2. 공개키를 폐쇄망 서버에 복사
-ssh-copy-id -i ~/.ssh/transfer_key.pub transfer_user@192.168.1.100
-
-# 3. SSH 설정 파일 생성
-cat >> ~/.ssh/config << EOF
-Host closed-network
-    HostName 192.168.1.100
-    User transfer_user
-    IdentityFile ~/.ssh/transfer_key
-    StrictHostKeyChecking no
-EOF
-```
-
-### 2. Chrome 확장 프로그램 설치
-
-#### Chrome 브라우저
-1. Chrome 주소창에 `chrome://extensions/` 입력
-2. 우측 상단 "개발자 모드" 토글 활성화
+### 4. Chrome Extension 설치
+1. Chrome에서 `chrome://extensions/` 접속
+2. 개발자 모드 활성화
 3. "압축해제된 확장 프로그램을 로드합니다" 클릭
-4. 이 프로젝트 폴더(`download_extension`) 선택
-5. 확장 프로그램이 설치되면 주소창 옆에 아이콘 표시
+4. 프로젝트 폴더 선택
+5. Extension 아이콘이 툴바에 표시되는지 확인
 
-#### Chrome 확장 프로그램 고정
-1. 확장 프로그램 아이콘 클릭 (퍼즐 모양)
-2. "HuggingFace Model Downloader" 옆 📌 버튼 클릭하여 고정
+## API 엔드포인트
 
-### 3. Microsoft Edge 확장 프로그램 설치
-
-#### Edge 브라우저
-1. Edge 주소창에 `edge://extensions/` 입력
-2. 왼쪽 하단 "개발자 모드" 토글 활성화
-3. "압축을 푼 확장을 로드합니다" 클릭
-4. 이 프로젝트 폴더(`download_extension`) 선택
-5. 확장 프로그램이 설치되면 주소창 옆에 아이콘 표시
-
-#### Edge 확장 프로그램 고정
-1. 확장 프로그램 아이콘 클릭 (퍼즐 모양)
-2. "HuggingFace Model Downloader" 옆 👁️ 버튼 클릭하여 표시
-
-### 4. 확장 프로그램 권한 설정
-
-설치 후 다음 권한이 자동으로 부여됩니다:
-- `https://huggingface.co/*` - HuggingFace 사이트 접근
-- `http://75.12.8.195/*` - 다운로드 서버 통신
-- `activeTab` - 현재 탭 정보 읽기
-- `storage` - 설정 저장
-
-### 5. 서버 연결 테스트
-
-#### 웹 브라우저에서 테스트
-```
-http://75.12.8.195:8080/health
-```
-정상 응답:
+### POST /download
+HuggingFace 모델 다운로드 및 전송
 ```json
 {
-  "status": "healthy",
-  "timestamp": "2024-01-15T10:30:00",
-  "downloads": 0
+  "author": "microsoft",
+  "repo_name": "DialoGPT-medium"
 }
 ```
 
-#### 명령줄에서 테스트
+### GET /status/{author}/{repo_name}
+모델 존재 여부 확인
 ```bash
-# 헬스 체크
-curl http://75.12.8.195:8080/health
-
-# 또는 테스트 스크립트 실행
-python test_server.py
+curl http://localhost:8000/status/microsoft/DialoGPT-medium
 ```
 
-## 상세 사용 가이드
-
-### 📝 기본 사용법
-
-#### 1단계: HuggingFace 모델 페이지 방문
-```
-https://huggingface.co/microsoft/DialoGPT-medium
-https://huggingface.co/Qwen/Qwen-Image-Edit
-https://huggingface.co/microsoft/codebert-base
-```
-등 아무 HuggingFace 모델 페이지에 접속
-
-#### 2단계: 확장 프로그램 실행
-1. 브라우저 주소창 옆의 🤗 아이콘 클릭
-2. 모델 정보가 자동으로 인식되어 표시됨
-3. 모델명, URL, 파일 개수 확인
-
-#### 3단계: 레포지토리 다운로드
-
-**📥 레포지토리 다운로드** (단일 버튼)
-- Git clone으로 전체 레포지토리를 자동 다운로드
-- 모든 파일(모델, 설정, 문서 등) 포함
-- 복잡한 파일 선택 과정 제거로 사용성 개선
-
-#### 4단계: 실시간 진행률 모니터링
-- **Git clone 단계별 진행률**: 객체 수신, 델타 해결, LFS 필터링 등
-- **실시간 상태 메시지**: "객체 수신 중: 45%", "델타 해결 중: 80%" 등  
-- **서버 연결 상태**: "✅ 서버 연결됨" / "❌ 서버 연결 실패"
-- **1초 간격 업데이트**로 실시간성 보장
-
-#### 5단계: 폐쇄망 전송
-- 다운로드 완료 시 **"🚀 폐쇄망으로 전송"** 버튼 자동 표시
-- 버튼 클릭 → 자동으로 폐쇄망 서버에 전송 시작
-- 전송 진행률 실시간 모니터링
-- 완료 시 "🎉 폐쇄망 전송 완료!" 메시지
-
-### 🔧 고급 설정
-
-#### 서버 IP 변경
-팝업 하단 "다운로드 서버 IP" 입력란에서 변경 가능
-- 기본값: `75.12.8.195`
-- 변경 후 자동 저장
-
-#### 다운로드 경로 변경
-`server_example.py`에서 수정:
-```python
-DOWNLOAD_BASE_DIR = "./data"  # 기본값 (원하는 경로로 변경 가능)
-```
-
-#### 폐쇄망 설정 변경  
-```python
-CLOSED_NETWORK_CONFIG = {
-    "host": "192.168.1.100",        # 폐쇄망 IP
-    "port": 22,                     # SSH 포트
-    "username": "your_username",    # SSH 사용자
-    "target_path": "/your/path/",   # 저장 경로
-    "use_scp": True                # SCP(True) 또는 rsync(False)
-}
-```
-
-### 🚨 문제 해결
-
-#### 확장 프로그램이 모델을 인식하지 못할 때
-- 페이지 새로고침 후 2-3초 대기
-- 모델 페이지인지 확인 (dataset, space 페이지 아님)
-- 개발자 콘솔에서 오류 메시지 확인
-
-#### 다운로드가 시작되지 않을 때
-1. 서버 상태 확인: `http://75.12.8.195:8080/health`
-2. 방화벽 설정 확인: `sudo ufw allow 8080`  
-3. 서버 로그 확인: `sudo journalctl -u hf-downloader -f`
-
-#### 전송이 실패할 때
-1. SSH 키 설정 확인
-2. 폐쇄망 서버 연결 테스트: `ssh transfer_user@192.168.1.100`
-3. 대상 경로 권한 확인: `ls -la /opt/models/`
-
-#### 대용량 모델 다운로드 시 주의사항
-- Git LFS 설치 필수: `git lfs install`
-- 충분한 디스크 공간 확보 (모델 크기의 2배 권장)
-- 네트워크 안정성 확인
-
-### 📊 지원하는 모델 유형
-
-- **언어 모델**: GPT, BERT, T5, LLaMA 등
-- **비전 모델**: ViT, CLIP, YOLO 등  
-- **멀티모달**: DALL-E, Stable Diffusion 등
-- **코드 모델**: CodeBERT, GitHub Copilot 등
-- **데이터셋**: 일부 지원 (dataset 타입 감지)
-
-### 💡 사용 팁
-
-**효율적인 다운로드**
-- Git clone 방식으로 완전한 레포지토리 다운로드
-- 실시간 진행률로 다운로드 상태 정확히 파악
-- 네트워크가 불안정하면 작은 모델부터 테스트
-- 서버 연결 상태를 사전에 확인하여 오류 방지
-
-**폐쇄망 전송 최적화**  
-- rsync 사용 시 중단된 전송 재개 가능
-- SCP는 더 안정적이지만 재개 불가
-- 대용량 파일은 압축 후 전송 고려
-
-## 서버 관리 가이드
-
-### 🖥️ 서버 운영 명령어
-
-#### 서비스 관리
+### GET /health
+서버 상태 확인
 ```bash
-# 서비스 시작
-sudo systemctl start hf-downloader
-
-# 서비스 중지  
-sudo systemctl stop hf-downloader
-
-# 서비스 재시작
-sudo systemctl restart hf-downloader
-
-# 서비스 상태 확인
-sudo systemctl status hf-downloader
-
-# 서비스 자동 시작 설정
-sudo systemctl enable hf-downloader
-
-# 서비스 자동 시작 해제
-sudo systemctl disable hf-downloader
+curl http://localhost:8000/health
 ```
 
-#### 로그 모니터링
+## 환경변수
+
+| 변수명 | 설명 | 예시 |
+|--------|------|------|
+| `DOWNLOAD_PROXY_URL` | 프록시 서버 URL | `http://localhost:8000` |
+| `DOWNLOAD_PROXY_PORT` | 서버 포트 | `8000` |
+| `SUPERCOMPUTER_HOST` | 슈퍼컴 서버 호스트 | `127.0.0.1` (로컬 테스트) |
+| `SUPERCOMPUTER_USER` | 슈퍼컴 사용자명 | `jinyoung` |
+| `SUPERCOMPUTER_PATH` | 저장 경로 | `/Users/jinyoung/code/download_extension/data_supercomputer` |
+| `LOCAL_DOWNLOAD_PATH` | 로컬 임시 경로 | `/Users/jinyoung/code/download_extension/data` |
+| `HUGGINGFACE_TOKEN` | HuggingFace 토큰 (선택) | `hf_xxxxxxxxxxxx` |
+
+**주의사항:**
+- SSH 키 경로는 자동으로 탐색됩니다 (`~/.ssh/id_rsa`, `~/.ssh/id_ed25519` 등)
+- SSH 키 인증이 설정되어 있어야 비밀번호 없이 작동합니다
+
+## 개발 상태
+
+### ✅ 완료된 기능
+- [x] Download Proxy Server 구현 (FastAPI)
+- [x] Git clone 기능
+- [x] SSH/SCP 전송 with 자동 경로 생성
+- [x] 중복 다운로드 방지 및 감지
+- [x] 전송 후 자동 로컬 파일 정리
+- [x] UV 환경 관리 및 의존성 설정
+- [x] Chrome Extension Manifest v3 구현
+- [x] HuggingFace URL 패턴 감지 및 SPA 지원
+- [x] Extension 팝업 UI/UX 구현
+- [x] Content Script - 페이지 내 다운로드 버튼
+- [x] Background Script - 메시지 처리 및 상태 관리
+- [x] SSH 키 자동 탐색 및 인증
+- [x] Extension 아이콘 생성 (자동)
+- [x] 서버 상태 확인 및 실시간 피드백
+
+### ✅ 완전 구현 완료
+모든 주요 기능이 구현되어 사용 가능한 상태입니다:
+- Chrome Extension이 HuggingFace 페이지를 감지
+- 원클릭으로 모델 다운로드 및 서버 전송
+- SSH 키 인증으로 비밀번호 없는 자동화
+- 중복 방지 및 진행 상황 실시간 표시
+
+## 사용 방법
+
+### 방법 1: Extension 팝업 사용
+1. HuggingFace 모델 페이지 방문 (예: `https://huggingface.co/microsoft/VibeVoice-1.5B`)
+2. Chrome extension 아이콘 클릭 (툴바에서 🤗 아이콘)
+3. 팝업에서 "Download Model" 버튼 클릭
+4. 진행 상황 실시간 확인 및 완료 대기
+
+### 방법 2: 페이지 내 다운로드 버튼 사용
+1. HuggingFace 모델 페이지 방문
+2. 페이지 상단에 자동으로 나타나는 "Download to Supercomputer" 버튼 클릭
+3. 버튼 상태 변화로 진행 상황 확인
+
+### 기능 특징
+- **자동 감지**: HuggingFace URL 패턴 자동 인식
+- **중복 방지**: 이미 다운로드된 모델은 "Already Downloaded" 표시
+- **실시간 피드백**: 다운로드 진행 상황 실시간 표시
+- **에러 처리**: 실패 시 에러 메시지 표시 및 자동 복구
+
+## 기술 스택
+
+- **Backend**: Python 3.8+, FastAPI, Uvicorn, AsyncIO
+- **Frontend**: Chrome Extension Manifest v3 (HTML, CSS, JavaScript)
+- **Tools**: Git, SSH/SCP, Pillow (아이콘 생성)
+- **Package Manager**: UV (Python), Chrome Extension
+- **Architecture**: RESTful API, Content Scripts, Background Workers
+
+## 트러블슈팅
+
+### Extension이 HuggingFace 페이지를 감지하지 못하는 경우
+1. Chrome에서 `chrome://extensions/` 접속
+2. Extension 새로고침 버튼 ⟳ 클릭
+3. 페이지 새로고침 후 재시도
+4. F12 개발자 도구 → Console에서 "HuggingFace Detector" 로그 확인
+
+### SSH 인증 실패
 ```bash
-# 실시간 로그 확인
-sudo journalctl -u hf-downloader -f
-
-# 최근 100줄 로그 확인
-sudo journalctl -u hf-downloader -n 100
-
-# 오늘 로그만 확인
-sudo journalctl -u hf-downloader --since today
-
-# 특정 시간 이후 로그 확인
-sudo journalctl -u hf-downloader --since "2024-01-15 10:00:00"
-```
-
-#### 디스크 관리
-```bash
-# 다운로드 디렉토리 사용량 확인
-du -sh /data/huggingface_models/*
-
-# 디스크 공간 확인
-df -h /data/huggingface_models
-
-# 오래된 다운로드 정리 (7일 이상)
-find /data/huggingface_models -type d -mtime +7 -name "*download_*" -exec rm -rf {} +
-```
-
-### 🔍 모니터링 및 성능
-
-#### API 상태 확인
-```bash
-# 헬스 체크
-curl http://75.12.8.195:8080/health
-
-# 현재 다운로드 목록
-curl http://75.12.8.195:8080/api/downloads
-
-# 현재 전송 목록  
-curl http://75.12.8.195:8080/api/transfers
-```
-
-#### 성능 모니터링
-```bash
-# CPU 및 메모리 사용률
-htop
-
-# 네트워크 사용률
-iftop
-
-# 디스크 I/O 모니터링
-iotop
-```
-
-#### 백업 및 복구
-```bash
-# 다운로드 디렉토리 백업
-tar -czf backup_$(date +%Y%m%d).tar.gz /data/huggingface_models
-
-# 설정 파일 백업
-cp server_example.py server_backup_$(date +%Y%m%d).py
-
-# 복구 (예시)
-tar -xzf backup_20240115.tar.gz -C /
-```
-
-### 🔒 보안 설정
-
-#### 방화벽 설정
-```bash
-# 포트 8080 허용 (Chrome 확장용)
-sudo ufw allow 8080
-
-# 특정 IP만 접근 허용
-sudo ufw allow from 192.168.1.0/24 to any port 8080
-
-# SSH 포트 보안 (폐쇄망 전송용)
-sudo ufw allow 22
-```
-
-#### SSL/TLS 설정 (선택사항)
-```bash
-# Let's Encrypt 인증서 설치
-sudo apt-get install certbot
-sudo certbot certonly --standalone -d yourdomain.com
-
-# Nginx 리버스 프록시 설정
-sudo apt-get install nginx
-```
-
-### 📊 성능 최적화
-
-#### 동시 다운로드 제한
-`server_example.py`에서 수정:
-```python
-# 최대 동시 다운로드 수
-MAX_CONCURRENT_DOWNLOADS = 3
-
-# 다운로드 타임아웃 설정
-DOWNLOAD_TIMEOUT = 3600  # 1시간
-```
-
-#### 메모리 사용 최적화
-```python
-# Git clone 옵션 추가
-cmd = ["git", "clone", "--depth", "1", repo_url, repo_path]  # shallow clone
-```
-
-### 🚨 장애 대응
-
-#### 일반적인 오류와 해결법
-
-**"Git LFS not installed" 오류**
-```bash
-sudo apt-get install git-lfs
-git lfs install
-```
-
-**"Permission denied" 오류**  
-```bash
-sudo chown -R $USER:$USER /data/huggingface_models
-chmod 755 /data/huggingface_models
-```
-
-**"Port already in use" 오류**
-```bash
-# 포트 사용 프로세스 확인
-sudo lsof -i :8080
-
-# 프로세스 종료
-sudo kill -9 [PID]
-```
-
-**SSH 연결 실패**
-```bash
-# SSH 연결 테스트
-ssh -vvv transfer_user@192.168.1.100
-
 # SSH 키 권한 확인
-chmod 600 ~/.ssh/transfer_key
+chmod 600 ~/.ssh/id_rsa
+chmod 644 ~/.ssh/id_rsa.pub
+
+# SSH 연결 테스트
+ssh username@hostname 'echo "test"'
+
+# SSH 키가 없는 경우 생성
+ssh-keygen -t rsa -b 4096
+ssh-copy-id username@hostname
 ```
 
-#### 응급 복구 절차
-1. 서비스 중지: `sudo systemctl stop hf-downloader`
-2. 로그 확인: `sudo journalctl -u hf-downloader -n 50`
-3. 설정 백업에서 복구: `cp server_backup.py server_example.py`
-4. 권한 재설정: `sudo chown -R $USER:$USER /data/`
-5. 서비스 재시작: `sudo systemctl start hf-downloader`
+### 서버 연결 실패
+```bash
+# 서버 상태 확인
+curl http://localhost:8000/health
 
-## 기본 설정 정보
+# 포트 사용 확인
+lsof -i :8000
 
-- **서버 주소**: 75.12.8.195:8080
-- **다운로드 경로**: /data/huggingface_models  
-- **폐쇄망 기본 설정**: 192.168.1.100:22
-- **지원 브라우저**: Chrome, Edge (Chromium 기반)
-- **팝업에서 서버 IP 변경 가능**
-
-## 서버 API 요구사항
-
-확장 프로그램이 작동하려면 75.12.8.195 서버에 다음 API가 구현되어야 합니다:
-
-### 1. 다운로드 시작
+# 서버 재시작
+uv run python server.py
 ```
-POST /api/download
-Content-Type: application/json
-
-{
-  "downloadId": "download_1234567890_abc123",
-  "repository": "Qwen/Qwen-Image-Edit",
-  "branch": "main",
-  "repoType": "model",
-  "files": [
-    {"name": "model.safetensors", "size": "1.2GB", "type": "model"},
-    {"name": "config.json", "size": "1KB", "type": "config"}
-  ],
-  "options": {
-    "includeGitHistory": false
-  }
-}
-```
-
-### 2. 다운로드 상태 확인
-```
-GET /api/status/{downloadId}
-
-Response:
-{
-  "status": "downloading", // "started", "downloading", "completed", "failed"
-  "progress": 45, // 0-100
-  "currentFile": "model.safetensors",
-  "totalFiles": 10,
-  "downloadedSize": "500MB",
-  "totalSize": "1.2GB",
-  "error": null
-}
-```
-
-### 3. 다운로드 취소
-```
-POST /api/cancel/{downloadId}
-```
-
-### 4. 폐쇄망 전송 시작
-```
-POST /api/transfer
-Content-Type: application/json
-
-{
-  "downloadId": "download_1234567890_abc123",
-  "targetPath": "/opt/models/"
-}
-```
-
-### 5. 전송 상태 확인
-```
-GET /api/transfer/status/{transferId}
-
-Response:
-{
-  "status": "transferring", // "started", "transferring", "completed", "failed"
-  "progress": 65, // 0-100
-  "transferId": "transfer_1234567890_download_abc123",
-  "downloadId": "download_1234567890_abc123",
-  "targetPath": "/opt/models/",
-  "error": null
-}
-```
-
-### 6. 전송 취소
-```
-POST /api/transfer/cancel/{transferId}
-```
-
-## 파일 구조
-
-```
-download_extension/
-├── manifest.json          # 확장 프로그램 설정
-├── popup.html            # 팝업 UI
-├── popup.js              # 팝업 로직
-├── content.js            # HuggingFace 페이지 파싱
-├── background.js         # API 통신 및 다운로드 관리
-├── icons/               # 아이콘 파일들
-└── README.md
-```
-
-## 개발 노트
-
-- Manifest V3 사용
-- HuggingFace 페이지의 DOM 구조 변경에 대응
-- SPA 라우팅 감지를 위한 MutationObserver 사용
-- 실시간 상태 업데이트를 위한 폴링 메커니즘

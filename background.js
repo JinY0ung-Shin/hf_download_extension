@@ -1,427 +1,240 @@
-// Background script for handling API calls and download management
+// Background script for HuggingFace Model Downloader Extension
+// Handles communication between content script and popup
 
-class DownloadManager {
-  constructor() {
-    this.downloads = new Map();
-    this.transfers = new Map();
-    this.setupMessageHandlers();
-    this.setupStorageDefaults();
-  }
-
-  setupStorageDefaults() {
-    chrome.storage.local.get(['serverConfig'], (result) => {
-      if (!result.serverConfig) {
-        chrome.storage.local.set({
-          serverConfig: {
-            ip: '75.12.8.195',
-            port: '8080',
-            endpoint: '/api/download'
-          }
-        });
-      }
-    });
-  }
-
-  setupMessageHandlers() {
-    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      switch (message.type) {
-        case 'MODEL_INFO_UPDATED':
-          this.handleModelInfoUpdate(message.data);
-          break;
-        case 'START_DOWNLOAD':
-          this.startDownload(message.data, sendResponse);
-          return true; // Keep message channel open for async response
-        case 'GET_DOWNLOAD_STATUS':
-          this.getDownloadStatus(message.downloadId, sendResponse);
-          return true;
-        case 'CANCEL_DOWNLOAD':
-          this.cancelDownload(message.downloadId, sendResponse);
-          return true;
-        case 'START_TRANSFER':
-          this.startTransfer(message.data, sendResponse);
-          return true;
-        case 'GET_TRANSFER_STATUS':
-          this.getTransferStatus(message.transferId, sendResponse);
-          return true;
-        case 'CANCEL_TRANSFER':
-          this.cancelTransfer(message.transferId, sendResponse);
-          return true;
-      }
-    });
-  }
-
-  handleModelInfoUpdate(modelInfo) {
-    console.log('Model info updated:', modelInfo);
-    // Update badge to show extension is active on HuggingFace page
-    chrome.action.setBadgeText({ text: '✓' });
-    chrome.action.setBadgeBackgroundColor({ color: '#ff6b35' });
-  }
-
-  async startDownload(downloadRequest, sendResponse) {
-    try {
-      const downloadId = this.generateDownloadId();
-      const { modelInfo, options } = downloadRequest;
-      
-      // Get server configuration
-      const result = await chrome.storage.local.get(['serverConfig']);
-      const serverConfig = result.serverConfig || {
-        ip: '75.12.8.195',
-        port: '8080',
-        endpoint: '/api/download'
-      };
-
-      // Create download entry
-      this.downloads.set(downloadId, {
-        id: downloadId,
-        modelInfo,
-        options,
-        status: 'initiating',
-        progress: 0,
-        startTime: Date.now(),
-        error: null
-      });
-
-      // Send request to download server
-      const serverUrl = `http://${serverConfig.ip}:${serverConfig.port}${serverConfig.endpoint}`;
-      
-      const requestPayload = {
-        downloadId,
-        repository: modelInfo.fullName,
-        branch: modelInfo.branch || 'main',
-        repoType: modelInfo.repoType || 'model',
-        options: {
-          includeGitHistory: options?.includeGitHistory || false,
-          ...options
-        }
-      };
-
-      console.log('Sending download request:', requestPayload);
-
-      const response = await fetch(serverUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestPayload)
-      });
-
-      if (!response.ok) {
-        throw new Error(`Server responded with status: ${response.status}`);
-      }
-
-      const responseData = await response.json();
-      
-      // Update download status
-      this.downloads.set(downloadId, {
-        ...this.downloads.get(downloadId),
-        status: 'started',
-        serverResponse: responseData
-      });
-
-      // Start polling for status updates
-      this.startStatusPolling(downloadId, serverConfig);
-
-      sendResponse({
-        success: true,
-        downloadId,
-        message: 'Download initiated successfully'
-      });
-
-    } catch (error) {
-      console.error('Download initiation failed:', error);
-      
-      if (downloadId && this.downloads.has(downloadId)) {
-        this.downloads.set(downloadId, {
-          ...this.downloads.get(downloadId),
-          status: 'failed',
-          error: error.message
-        });
-      }
-
-      sendResponse({
-        success: false,
-        error: error.message
-      });
+class BackgroundService {
+    constructor() {
+        console.log('BackgroundService: Initializing...');
+        this.init();
     }
-  }
 
-  startStatusPolling(downloadId, serverConfig) {
-    const pollInterval = setInterval(async () => {
-      try {
-        const statusUrl = `http://${serverConfig.ip}:${serverConfig.port}/api/status/${downloadId}`;
-        const response = await fetch(statusUrl);
-        
-        if (response.ok) {
-          const statusData = await response.json();
-          const currentDownload = this.downloads.get(downloadId);
-          
-          if (currentDownload) {
-            this.downloads.set(downloadId, {
-              ...currentDownload,
-              status: statusData.status,
-              progress: statusData.progress || 0,
-              currentFile: statusData.currentFile,
-              totalFiles: statusData.totalFiles,
-              downloadedSize: statusData.downloadedSize,
-              totalSize: statusData.totalSize,
-              error: statusData.error
-            });
+    init() {
+        this.setupMessageListeners();
+        this.setupTabListeners();
+    }
 
-            // Send status update to popup if open
-            chrome.runtime.sendMessage({
-              type: 'DOWNLOAD_STATUS_UPDATE',
-              downloadId,
-              status: statusData
-            });
+    setupMessageListeners() {
+        console.log('BackgroundService: Setting up message listeners...');
+        chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+            console.log('BackgroundService: Received message:', request);
+            switch (request.action) {
+                case 'download':
+                    this.handleDownload(request.data, sendResponse);
+                    return true; // Will respond asynchronously
 
-            // Stop polling if download is complete or failed
-            if (statusData.status === 'completed' || statusData.status === 'failed') {
-              clearInterval(pollInterval);
-              
-              // Update badge
-              if (statusData.status === 'completed') {
-                chrome.action.setBadgeText({ text: '✓' });
-                chrome.action.setBadgeBackgroundColor({ color: '#28a745' });
-              } else {
-                chrome.action.setBadgeText({ text: '✗' });
-                chrome.action.setBadgeBackgroundColor({ color: '#dc3545' });
-              }
+                case 'checkServerStatus':
+                    this.checkServerStatus(sendResponse);
+                    return true; // Will respond asynchronously
+
+                case 'getRepoInfo':
+                    this.getRepoInfo(sendResponse);
+                    return true; // Will respond asynchronously
+
+                default:
+                    sendResponse({ error: 'Unknown action' });
+                    return false;
             }
-          }
-        }
-      } catch (error) {
-        console.error('Status polling error:', error);
-      }
-    }, 1000); // Poll every 1 second for real-time updates
-
-    // Stop polling after 1 hour to prevent infinite polling
-    setTimeout(() => {
-      clearInterval(pollInterval);
-    }, 3600000);
-  }
-
-  getDownloadStatus(downloadId, sendResponse) {
-    const download = this.downloads.get(downloadId);
-    sendResponse({
-      success: true,
-      status: download || null
-    });
-  }
-
-  async cancelDownload(downloadId, sendResponse) {
-    try {
-      const result = await chrome.storage.local.get(['serverConfig']);
-      const serverConfig = result.serverConfig || {
-        ip: '75.12.8.195',
-        port: '8080'
-      };
-
-      const cancelUrl = `http://${serverConfig.ip}:${serverConfig.port}/api/cancel/${downloadId}`;
-      const response = await fetch(cancelUrl, { method: 'POST' });
-
-      if (response.ok) {
-        const download = this.downloads.get(downloadId);
-        if (download) {
-          this.downloads.set(downloadId, {
-            ...download,
-            status: 'cancelled'
-          });
-        }
-
-        sendResponse({
-          success: true,
-          message: 'Download cancelled successfully'
         });
-      } else {
-        throw new Error(`Failed to cancel download: ${response.status}`);
-      }
-    } catch (error) {
-      console.error('Cancel download error:', error);
-      sendResponse({
-        success: false,
-        error: error.message
-      });
     }
-  }
 
-  async startTransfer(transferRequest, sendResponse) {
-    try {
-      const { downloadId, targetPath } = transferRequest;
-      
-      if (!downloadId) {
-        sendResponse({
-          success: false,
-          error: 'Download ID is required'
+    setupTabListeners() {
+        // Update extension state when tab changes
+        chrome.tabs.onActivated.addListener(async (activeInfo) => {
+            await this.updateExtensionState(activeInfo.tabId);
         });
-        return;
-      }
 
-      // Get server configuration
-      const result = await chrome.storage.local.get(['serverConfig']);
-      const serverConfig = result.serverConfig || {
-        ip: '75.12.8.195',
-        port: '8080',
-        endpoint: '/api/transfer'
-      };
-
-      const serverUrl = `http://${serverConfig.ip}:${serverConfig.port}/api/transfer`;
-      
-      const requestPayload = {
-        downloadId,
-        targetPath: targetPath || '/opt/models/'
-      };
-
-      console.log('Sending transfer request:', requestPayload);
-
-      const response = await fetch(serverUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestPayload)
-      });
-
-      if (!response.ok) {
-        throw new Error(`Server responded with status: ${response.status}`);
-      }
-
-      const responseData = await response.json();
-      const transferId = responseData.transferId;
-      
-      // Store transfer info
-      this.transfers.set(transferId, {
-        id: transferId,
-        downloadId,
-        status: 'started',
-        progress: 0,
-        startTime: Date.now(),
-        error: null
-      });
-
-      // Start polling for transfer status updates
-      this.startTransferStatusPolling(transferId, serverConfig);
-
-      sendResponse({
-        success: true,
-        transferId,
-        message: 'Transfer initiated successfully'
-      });
-
-    } catch (error) {
-      console.error('Transfer initiation failed:', error);
-      sendResponse({
-        success: false,
-        error: error.message
-      });
-    }
-  }
-
-  startTransferStatusPolling(transferId, serverConfig) {
-    const pollInterval = setInterval(async () => {
-      try {
-        const statusUrl = `http://${serverConfig.ip}:${serverConfig.port}/api/transfer/status/${transferId}`;
-        const response = await fetch(statusUrl);
-        
-        if (response.ok) {
-          const statusData = await response.json();
-          const currentTransfer = this.transfers.get(transferId);
-          
-          if (currentTransfer) {
-            this.transfers.set(transferId, {
-              ...currentTransfer,
-              status: statusData.status,
-              progress: statusData.progress || 0,
-              currentFile: statusData.currentFile,
-              totalFiles: statusData.totalFiles,
-              transferredSize: statusData.transferredSize,
-              totalSize: statusData.totalSize,
-              error: statusData.error
-            });
-
-            // Send status update to popup if open
-            chrome.runtime.sendMessage({
-              type: 'TRANSFER_STATUS_UPDATE',
-              transferId,
-              status: statusData
-            });
-
-            // Stop polling if transfer is complete or failed
-            if (statusData.status === 'completed' || statusData.status === 'failed') {
-              clearInterval(pollInterval);
-              
-              // Update badge
-              if (statusData.status === 'completed') {
-                chrome.action.setBadgeText({ text: '✓' });
-                chrome.action.setBadgeBackgroundColor({ color: '#28a745' });
-              } else {
-                chrome.action.setBadgeText({ text: '✗' });
-                chrome.action.setBadgeBackgroundColor({ color: '#dc3545' });
-              }
+        chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+            if (changeInfo.status === 'complete') {
+                await this.updateExtensionState(tabId);
             }
-          }
-        }
-      } catch (error) {
-        console.error('Transfer status polling error:', error);
-      }
-    }, 1500); // Poll every 1.5 seconds for real-time transfer updates
-
-    // Stop polling after 2 hours
-    setTimeout(() => {
-      clearInterval(pollInterval);
-    }, 7200000);
-  }
-
-  getTransferStatus(transferId, sendResponse) {
-    const transfer = this.transfers.get(transferId);
-    sendResponse({
-      success: true,
-      status: transfer || null
-    });
-  }
-
-  async cancelTransfer(transferId, sendResponse) {
-    try {
-      const result = await chrome.storage.local.get(['serverConfig']);
-      const serverConfig = result.serverConfig || {
-        ip: '75.12.8.195',
-        port: '8080'
-      };
-
-      const cancelUrl = `http://${serverConfig.ip}:${serverConfig.port}/api/transfer/cancel/${transferId}`;
-      const response = await fetch(cancelUrl, { method: 'POST' });
-
-      if (response.ok) {
-        const transfer = this.transfers.get(transferId);
-        if (transfer) {
-          this.transfers.set(transferId, {
-            ...transfer,
-            status: 'cancelled'
-          });
-        }
-
-        sendResponse({
-          success: true,
-          message: 'Transfer cancelled successfully'
         });
-      } else {
-        throw new Error(`Failed to cancel transfer: ${response.status}`);
-      }
-    } catch (error) {
-      console.error('Cancel transfer error:', error);
-      sendResponse({
-        success: false,
-        error: error.message
-      });
     }
-  }
 
-  generateDownloadId() {
-    return `download_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
-  }
+    async updateExtensionState(tabId) {
+        try {
+            const tab = await chrome.tabs.get(tabId);
+            const isHuggingFace = this.isHuggingFaceUrl(tab.url);
+
+            // Update storage
+            await chrome.storage.local.set({
+                isHuggingFaceRepo: isHuggingFace,
+                currentTabId: tabId
+            });
+
+            // Update extension icon and badge
+            if (isHuggingFace) {
+                await chrome.action.setBadgeText({
+                    text: '●',
+                    tabId: tabId
+                });
+                await chrome.action.setBadgeBackgroundColor({
+                    color: '#28a745',
+                    tabId: tabId
+                });
+                await chrome.action.setTitle({
+                    title: 'HuggingFace Model Downloader - Repository Detected',
+                    tabId: tabId
+                });
+            } else {
+                await chrome.action.setBadgeText({
+                    text: '',
+                    tabId: tabId
+                });
+                await chrome.action.setTitle({
+                    title: 'HuggingFace Model Downloader',
+                    tabId: tabId
+                });
+            }
+        } catch (error) {
+            console.error('Failed to update extension state:', error);
+        }
+    }
+
+    isHuggingFaceUrl(url) {
+        if (!url) return false;
+        const pattern = /^https:\/\/huggingface\.co\/([^\/]+)\/([^\/]+)/;
+        return pattern.test(url);
+    }
+
+    async handleDownload(repoData, sendResponse) {
+        try {
+            console.log('Starting download for:', repoData);
+
+            // Validate repo data
+            if (!repoData || !repoData.author || !repoData.repo_name) {
+                throw new Error('Invalid repository data');
+            }
+
+            // Make request to download proxy server
+            const response = await fetch('http://localhost:8000/download', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    author: repoData.author,
+                    repo_name: repoData.repo_name,
+                    url: repoData.url
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.detail || 'Download request failed');
+            }
+
+            // Send success response
+            sendResponse({
+                success: true,
+                data: data,
+                message: data.message
+            });
+
+            // Show notification
+            await this.showNotification(
+                data.status === 'exists' ? 'Model Already Exists' : 'Download Complete',
+                data.message,
+                data.status === 'exists' ? 'info' : 'success'
+            );
+
+        } catch (error) {
+            console.error('Download failed:', error);
+
+            // Send error response
+            sendResponse({
+                success: false,
+                error: error.message
+            });
+
+            // Show error notification
+            await this.showNotification(
+                'Download Failed',
+                error.message,
+                'error'
+            );
+        }
+    }
+
+    async checkServerStatus(sendResponse) {
+        try {
+            const response = await fetch('http://localhost:8000/health', {
+                method: 'GET',
+                timeout: 5000
+            });
+
+            const isOnline = response.ok;
+            const data = isOnline ? await response.json() : null;
+
+            sendResponse({
+                online: isOnline,
+                data: data
+            });
+        } catch (error) {
+            sendResponse({
+                online: false,
+                error: error.message
+            });
+        }
+    }
+
+    async getRepoInfo(sendResponse) {
+        try {
+            const stored = await chrome.storage.local.get(['currentRepo', 'isHuggingFaceRepo']);
+            sendResponse({
+                repoInfo: stored.currentRepo,
+                isHuggingFaceRepo: stored.isHuggingFaceRepo
+            });
+        } catch (error) {
+            sendResponse({
+                repoInfo: null,
+                isHuggingFaceRepo: false,
+                error: error.message
+            });
+        }
+    }
+
+    async showNotification(title, message, type = 'info') {
+        try {
+            const iconUrl = this.getIconForType(type);
+
+            await chrome.notifications.create({
+                type: 'basic',
+                iconUrl: iconUrl,
+                title: title,
+                message: message,
+                priority: type === 'error' ? 2 : 1
+            });
+        } catch (error) {
+            console.error('Failed to show notification:', error);
+        }
+    }
+
+    getIconForType(type) {
+        // For now, use a default icon path
+        // In a real implementation, you'd have different icons for different types
+        return 'icons/icon48.png';
+    }
+
+    // Utility method to extract repo info from URL
+    extractRepoFromUrl(url) {
+        if (!url) return null;
+
+        const pattern = /^https:\/\/huggingface\.co\/([^\/]+)\/([^\/]+)/;
+        const match = url.match(pattern);
+
+        if (match) {
+            return {
+                author: match[1],
+                repo_name: match[2],
+                url: `https://huggingface.co/${match[1]}/${match[2]}`
+            };
+        }
+
+        return null;
+    }
 }
 
-// Initialize download manager
-const downloadManager = new DownloadManager();
-
-// Clear badge when extension starts
-chrome.action.setBadgeText({ text: '' });
+// Initialize background service
+console.log('Background script loaded, initializing service...');
+new BackgroundService();
+console.log('BackgroundService initialized.');

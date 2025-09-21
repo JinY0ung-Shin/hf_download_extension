@@ -1,468 +1,344 @@
-// Popup script for the HuggingFace Model Downloader extension
+// Popup script for HuggingFace Model Downloader Extension
 
-class PopupManager {
-  constructor() {
-    this.currentModel = null;
-    this.currentDownload = null;
-    this.currentTransfer = null;
-    this.init();
-  }
-
-  async init() {
-    await this.loadServerConfig();
-    await this.loadCurrentModel();
-    this.setupEventListeners();
-    this.setupMessageListener();
-    this.updateUI();
-    await this.checkInitialServerStatus();
-  }
-
-  async loadServerConfig() {
-    const result = await chrome.storage.local.get(['serverConfig']);
-    const config = result.serverConfig || { ip: '75.12.8.195', port: '8080' };
-    document.getElementById('server-ip').value = config.ip;
-  }
-
-  async loadCurrentModel() {
-    const result = await chrome.storage.local.get(['currentModel']);
-    this.currentModel = result.currentModel || null;
-  }
-
-  setupEventListeners() {
-    // Server IP configuration
-    document.getElementById('server-ip').addEventListener('change', (e) => {
-      this.saveServerConfig(e.target.value);
-    });
-
-    // Listen for download status updates
-    chrome.runtime.onMessage.addListener((message) => {
-      if (message.type === 'DOWNLOAD_STATUS_UPDATE') {
-        this.updateDownloadStatus(message.status);
-      } else if (message.type === 'TRANSFER_STATUS_UPDATE') {
-        this.updateTransferStatus(message.status);
-      }
-    });
-  }
-
-  setupMessageListener() {
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (message.type === 'DOWNLOAD_STATUS_UPDATE') {
-        this.updateDownloadStatus(message.status);
-      } else if (message.type === 'TRANSFER_STATUS_UPDATE') {
-        this.updateTransferStatus(message.status);
-      }
-    });
-  }
-
-  async saveServerConfig(ip) {
-    await chrome.storage.local.set({
-      serverConfig: { ip, port: '8080', endpoint: '/api/download' }
-    });
-    
-    // IP 변경 후 서버 상태 다시 확인
-    console.log(`Server IP changed to: ${ip}`);
-    await this.checkInitialServerStatus();
-  }
-
-  updateUI() {
-    const contentDiv = document.getElementById('content');
-    
-    if (!this.currentModel) {
-      contentDiv.innerHTML = `
-        <div class="no-repo">
-          HuggingFace 모델 페이지에서 이 확장을 사용하세요.
-          <br><br>
-          <small>현재 페이지가 HuggingFace 모델 페이지인지 확인해주세요.</small>
-        </div>
-      `;
-      return;
+class PopupController {
+    constructor() {
+        this.repoInfo = null;
+        this.serverOnline = false;
+        this.downloadInProgress = false;
+        this.init();
     }
 
-    contentDiv.innerHTML = this.renderModelInfo();
-    this.attachDownloadHandlers();
-  }
-
-  renderModelInfo() {
-    const model = this.currentModel;
-    
-    return `
-      <div class="repo-info">
-        <div class="repo-name">${model.fullName}</div>
-        <div class="repo-url">${model.url}</div>
-        <div style="margin-top: 8px; font-size: 12px; color: #666;">
-          ${model.repoType || 'model'} • ${model.branch || 'main'} 브랜치
-        </div>
-      </div>
-      
-      <div class="download-section">
-        <button id="download-repo" class="download-btn">
-          📥 레포지토리 다운로드
-        </button>
-        <div style="margin-top: 8px; font-size: 12px; color: #666; text-align: center;">
-          Git clone으로 전체 레포지토리를 다운로드합니다
-        </div>
-        <div id="server-status" style="margin-top: 8px; font-size: 11px; text-align: center;"></div>
-      </div>
-      
-      <div id="download-status"></div>
-      <div id="transfer-section" style="display: none; margin-top: 16px; border-top: 1px solid #e5e5e5; padding-top: 16px;">
-        <button id="transfer-to-closed" class="download-btn" style="background: #17a2b8;">
-          🚀 폐쇄망으로 전송
-        </button>
-        <div id="transfer-status"></div>
-      </div>
-    `;
-  }
-
-
-  attachDownloadHandlers() {
-    document.getElementById('download-repo')?.addEventListener('click', () => {
-      this.startDownload();
-    });
-
-    document.getElementById('transfer-to-closed')?.addEventListener('click', () => {
-      this.startTransfer();
-    });
-  }
-
-  async startDownload() {
-    if (!this.currentModel) {
-      this.showStatus('error', '모델 정보를 찾을 수 없습니다.');
-      return;
+    async init() {
+        await this.checkServerStatus();
+        await this.loadRepoInfo();
+        this.setupEventListeners();
+        this.updateUI();
+        await this.checkForOngoingDownload();
     }
 
-    // 서버 연결 확인
-    this.showStatus('info', '서버 연결을 확인하는 중...');
-    const serverAvailable = await this.checkServerConnection();
-    
-    if (!serverAvailable) {
-      this.showStatus('error', '❌ 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인해주세요.');
-      return;
-    }
-
-    this.showStatus('info', `${this.currentModel.fullName} 다운로드를 시작합니다...`);
-    
-    // Disable download buttons
-    this.setDownloadButtonsEnabled(false);
-
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'START_DOWNLOAD',
-        data: {
-          modelInfo: this.currentModel,
-          options: {
-            includeGitHistory: false
-          }
-        }
-      });
-
-      if (response.success) {
-        this.currentDownload = {
-          id: response.downloadId,
-          status: 'started',
-          progress: 0
-        };
-        this.showStatus('info', '다운로드가 시작되었습니다. 서버에서 Git clone 진행 중입니다...');
-        this.startProgressUpdates();
-      } else {
-        let errorMsg = response.error || '알 수 없는 오류';
-        if (errorMsg.includes('fetch')) {
-          errorMsg = '서버 연결 실패. 네트워크 상태를 확인해주세요.';
-        } else if (errorMsg.includes('timeout')) {
-          errorMsg = '서버 응답 시간 초과. 잠시 후 다시 시도해주세요.';
-        }
-        this.showStatus('error', `다운로드 실패: ${errorMsg}`);
-        this.setDownloadButtonsEnabled(true);
-      }
-    } catch (error) {
-      let errorMsg = error.message;
-      if (errorMsg.includes('fetch')) {
-        errorMsg = '서버 연결 실패. 서버가 실행 중인지 확인해주세요.';
-      }
-      this.showStatus('error', `오류 발생: ${errorMsg}`);
-      this.setDownloadButtonsEnabled(true);
-    }
-  }
-
-  async checkServerConnection() {
-    try {
-      const result = await chrome.storage.local.get(['serverConfig']);
-      const serverConfig = result.serverConfig || { ip: '75.12.8.195', port: '8080' };
-      
-      const response = await fetch(`http://${serverConfig.ip}:${serverConfig.port}/health`, {
-        method: 'GET',
-        timeout: 5000  // 5초 타임아웃
-      });
-      
-      return response.ok;
-    } catch (error) {
-      console.log('Server connection check failed:', error);
-      return false;
-    }
-  }
-
-  startProgressUpdates() {
-    const updateInterval = setInterval(async () => {
-      if (!this.currentDownload) {
-        clearInterval(updateInterval);
-        return;
-      }
-
-      try {
-        const response = await chrome.runtime.sendMessage({
-          type: 'GET_DOWNLOAD_STATUS',
-          downloadId: this.currentDownload.id
-        });
-
-        if (response.success && response.status) {
-          this.updateDownloadStatus(response.status);
-          
-          if (response.status.status === 'completed' || response.status.status === 'failed') {
-            clearInterval(updateInterval);
-            this.setDownloadButtonsEnabled(true);
-            
-            // Show transfer section if download completed successfully
-            if (response.status.status === 'completed') {
-              this.showTransferSection();
+    async checkServerStatus() {
+        try {
+            const response = await fetch('http://localhost:8000/health');
+            if (response.ok) {
+                this.serverOnline = true;
+                this.updateServerStatus('Server Online', 'online');
+            } else {
+                throw new Error('Server returned error status');
             }
-          }
+        } catch (error) {
+            this.serverOnline = false;
+            this.updateServerStatus('Server Offline', 'offline');
+            console.error('Server status check failed:', error);
         }
-      } catch (error) {
-        console.error('Status update error:', error);
-      }
-    }, 1000); // 1초마다 업데이트로 실시간성 향상
-
-    // Stop updates after 1 hour
-    setTimeout(() => {
-      clearInterval(updateInterval);
-      this.setDownloadButtonsEnabled(true);
-    }, 3600000);
-  }
-
-  updateDownloadStatus(status) {
-    const statusDiv = document.getElementById('download-status');
-    if (!statusDiv) return;
-
-    const progress = status.progress || 0;
-    const currentFile = status.currentFile || '';
-    const downloadedSize = status.downloadedSize || '';
-    const totalSize = status.totalSize || '';
-
-    let statusClass, statusText;
-    
-    switch (status.status) {
-      case 'started':
-      case 'downloading':
-        statusClass = 'info';
-        statusText = `다운로드 중... ${Math.round(progress)}%`;
-        if (currentFile) statusText += `<br><small>현재: ${currentFile}</small>`;
-        if (downloadedSize && totalSize) statusText += `<br><small>${downloadedSize} / ${totalSize}</small>`;
-        break;
-      case 'completed':
-        statusClass = 'success';
-        statusText = '✅ 다운로드 완료! 폐쇄망으로 복사 준비 완료.';
-        break;
-      case 'failed':
-        statusClass = 'error';
-        statusText = `❌ 다운로드 실패: ${status.error || '알 수 없는 오류'}`;
-        break;
-      default:
-        statusClass = 'info';
-        statusText = '상태 업데이트 중...';
     }
 
-    statusDiv.innerHTML = `
-      <div class="status ${statusClass}">
-        ${statusText}
-      </div>
-      ${progress > 0 ? `
-        <div class="progress">
-          <div class="progress-bar" style="width: ${progress}%"></div>
-        </div>
-      ` : ''}
-    `;
-  }
+    updateServerStatus(text, status) {
+        const indicator = document.getElementById('server-indicator');
+        const statusText = document.getElementById('server-status-text');
 
-  showStatus(type, message) {
-    const statusDiv = document.getElementById('download-status');
-    if (statusDiv) {
-      statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
-    }
-  }
-
-  setDownloadButtonsEnabled(enabled) {
-    const buttons = document.querySelectorAll('.download-btn');
-    buttons.forEach(btn => {
-      if (btn.id !== 'transfer-to-closed') { // 전송 버튼은 별도로 관리
-        btn.disabled = !enabled;
-      }
-    });
-  }
-
-  showTransferSection() {
-    const transferSection = document.getElementById('transfer-section');
-    if (transferSection) {
-      transferSection.style.display = 'block';
-    }
-  }
-
-  async startTransfer() {
-    if (!this.currentDownload || !this.currentDownload.id) {
-      this.showTransferStatus('error', '전송할 다운로드가 없습니다.');
-      return;
+        indicator.className = `status-indicator ${status}`;
+        statusText.textContent = text;
     }
 
-    this.showTransferStatus('info', '폐쇄망 전송을 시작합니다...');
-    
-    // Disable transfer button
-    this.setTransferButtonEnabled(false);
+    async loadRepoInfo() {
+        try {
+            // Get current tab info
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'START_TRANSFER',
-        data: {
-          downloadId: this.currentDownload.id,
-          targetPath: '/opt/models/'
+            // Check if we're on a HuggingFace page
+            if (tab.url && tab.url.includes('huggingface.co')) {
+                // Get repo info from content script
+                const response = await chrome.tabs.sendMessage(tab.id, { action: 'getRepoInfo' });
+                this.repoInfo = response?.repoInfo;
+            }
+
+            // Also check stored repo info
+            const stored = await chrome.storage.local.get(['currentRepo', 'isHuggingFaceRepo']);
+            if (stored.isHuggingFaceRepo && stored.currentRepo) {
+                this.repoInfo = stored.currentRepo;
+            }
+        } catch (error) {
+            console.log('Could not load repo info:', error);
         }
-      });
-
-      if (response.success) {
-        this.currentTransfer = {
-          id: response.transferId,
-          status: 'started',
-          progress: 0
-        };
-        this.showTransferStatus('info', '폐쇄망 전송이 시작되었습니다.');
-        this.startTransferProgressUpdates();
-      } else {
-        this.showTransferStatus('error', `전송 실패: ${response.error}`);
-        this.setTransferButtonEnabled(true);
-      }
-    } catch (error) {
-      this.showTransferStatus('error', `오류 발생: ${error.message}`);
-      this.setTransferButtonEnabled(true);
     }
-  }
 
-  startTransferProgressUpdates() {
-    const updateInterval = setInterval(async () => {
-      if (!this.currentTransfer) {
-        clearInterval(updateInterval);
-        return;
-      }
-
-      try {
-        const response = await chrome.runtime.sendMessage({
-          type: 'GET_TRANSFER_STATUS',
-          transferId: this.currentTransfer.id
+    setupEventListeners() {
+        const downloadBtn = document.getElementById('download-btn');
+        downloadBtn.addEventListener('click', () => {
+            this.initiateDownload();
         });
+    }
 
-        if (response.success && response.status) {
-          this.updateTransferStatus(response.status);
-          
-          if (response.status.status === 'completed' || response.status.status === 'failed') {
-            clearInterval(updateInterval);
-            this.setTransferButtonEnabled(true);
-          }
+    updateUI() {
+        const repoInfoDiv = document.getElementById('repo-info');
+        const noRepoDiv = document.getElementById('no-repo');
+        const downloadBtn = document.getElementById('download-btn');
+
+        if (this.repoInfo) {
+            repoInfoDiv.classList.add('active');
+            noRepoDiv.style.display = 'none';
+
+            document.getElementById('repo-details').innerHTML = `
+                <strong>Author:</strong> ${this.repoInfo.author}<br>
+                <strong>Repository:</strong> ${this.repoInfo.repo_name}<br>
+                <strong>URL:</strong> <a href="${this.repoInfo.url}" target="_blank" style="color: #007bff; text-decoration: none;">${this.repoInfo.url}</a>
+            `;
+
+            // Check if model already exists
+            this.checkModelStatus();
+        } else {
+            repoInfoDiv.classList.remove('active');
+            noRepoDiv.style.display = 'block';
         }
-      } catch (error) {
-        console.error('Transfer status update error:', error);
-      }
-    }, 1500); // 1.5초마다 업데이트로 전송 진행률 실시간 표시
 
-    // Stop updates after 2 hours
-    setTimeout(() => {
-      clearInterval(updateInterval);
-      this.setTransferButtonEnabled(true);
-    }, 7200000);
-  }
-
-  updateTransferStatus(status) {
-    const statusDiv = document.getElementById('transfer-status');
-    if (!statusDiv) return;
-
-    const progress = status.progress || 0;
-    const currentFile = status.currentFile || '';
-    const transferredSize = status.transferredSize || '';
-    const totalSize = status.totalSize || '';
-
-    let statusClass, statusText;
-    
-    switch (status.status) {
-      case 'started':
-      case 'transferring':
-        statusClass = 'info';
-        statusText = `폐쇄망 전송 중... ${Math.round(progress)}%`;
-        if (currentFile) statusText += `<br><small>현재: ${currentFile}</small>`;
-        if (transferredSize && totalSize) statusText += `<br><small>${transferredSize} / ${totalSize}</small>`;
-        break;
-      case 'completed':
-        statusClass = 'success';
-        statusText = '🎉 폐쇄망 전송 완료! 모델이 성공적으로 전송되었습니다.';
-        break;
-      case 'failed':
-        statusClass = 'error';
-        statusText = `❌ 전송 실패: ${status.error || '알 수 없는 오류'}`;
-        break;
-      default:
-        statusClass = 'info';
-        statusText = '전송 상태 업데이트 중...';
+        // Update download button based on server status
+        downloadBtn.disabled = !this.serverOnline || this.downloadInProgress;
+        if (!this.serverOnline) {
+            downloadBtn.textContent = 'Server Offline';
+            downloadBtn.className = 'download-btn error';
+        }
     }
 
-    statusDiv.innerHTML = `
-      <div class="status ${statusClass}">
-        ${statusText}
-      </div>
-      ${progress > 0 ? `
-        <div class="progress">
-          <div class="progress-bar" style="width: ${progress}%"></div>
-        </div>
-      ` : ''}
-    `;
-  }
+    async checkModelStatus() {
+        if (!this.repoInfo || !this.serverOnline) return;
 
-  showTransferStatus(type, message) {
-    const statusDiv = document.getElementById('transfer-status');
-    if (statusDiv) {
-      statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+        try {
+            const response = await fetch(`http://localhost:8000/status/${this.repoInfo.author}/${this.repoInfo.repo_name}`);
+            const data = await response.json();
+
+            const downloadBtn = document.getElementById('download-btn');
+
+            if (data.exists_on_supercomputer) {
+                downloadBtn.innerHTML = `
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="20,6 9,17 4,12"/>
+                    </svg>
+                    Already Downloaded
+                `;
+                downloadBtn.className = 'download-btn success';
+                downloadBtn.disabled = true;
+
+                this.addLogEntry(`Model already exists at: ${data.path}`, 'success');
+            }
+        } catch (error) {
+            console.error('Failed to check model status:', error);
+        }
     }
-  }
 
-  setTransferButtonEnabled(enabled) {
-    const button = document.getElementById('transfer-to-closed');
-    if (button) {
-      button.disabled = !enabled;
+    async initiateDownload() {
+        if (!this.repoInfo || !this.serverOnline || this.downloadInProgress) return;
+
+        this.downloadInProgress = true;
+        const downloadBtn = document.getElementById('download-btn');
+        const progressBar = document.getElementById('progress-bar');
+        const logSection = document.getElementById('log-section');
+
+        // Update UI
+        downloadBtn.innerHTML = `
+            <div class="spinner"></div>
+            Initializing...
+        `;
+        downloadBtn.disabled = true;
+        progressBar.style.display = 'block';
+        logSection.style.display = 'block';
+
+        this.addLogEntry('Starting download request...', 'info');
+        this.updateProgress(5);
+
+        try {
+            // Start download (async)
+            fetch('http://localhost:8000/download', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    author: this.repoInfo.author,
+                    repo_name: this.repoInfo.repo_name,
+                    url: this.repoInfo.url
+                })
+            });
+
+            // Start progress polling
+            await this.pollProgress(downloadBtn);
+
+        } catch (error) {
+            this.addLogEntry(`Error: ${error.message}`, 'error');
+            this.showDownloadError(downloadBtn, error.message);
+        }
     }
-  }
 
-  async checkInitialServerStatus() {
-    const statusDiv = document.getElementById('server-status');
-    if (!statusDiv) return;
+    async pollProgress(downloadBtn) {
+        const pollInterval = 1000; // Poll every 1 second
+        let pollCount = 0;
+        const maxPolls = 300; // Max 5 minutes
 
-    statusDiv.innerHTML = '<span style="color: #666;">🔄 서버 상태 확인 중...</span>';
-    
-    const isAvailable = await this.checkServerConnection();
-    
-    if (isAvailable) {
-      statusDiv.innerHTML = '<span style="color: #28a745;">✅ 서버 연결됨</span>';
-    } else {
-      statusDiv.innerHTML = '<span style="color: #dc3545;">❌ 서버 연결 실패</span>';
-      
-      // 다운로드 버튼 비활성화
-      this.setDownloadButtonsEnabled(false);
+        const poll = async () => {
+            try {
+                const response = await fetch(`http://localhost:8000/progress/${this.repoInfo.author}/${this.repoInfo.repo_name}`);
+                const progress = await response.json();
+
+                if (progress.status === 'not_found' && pollCount < 5) {
+                    // Still initializing, continue polling
+                    pollCount++;
+                    this.addLogEntry('Initializing download...', 'info');
+                    setTimeout(poll, pollInterval);
+                    return;
+                }
+
+                if (progress.status === 'cloning') {
+                    downloadBtn.innerHTML = `
+                        <div class="spinner"></div>
+                        Downloading... ${progress.progress}%
+                    `;
+                    this.updateProgress(progress.progress);
+                    this.addLogEntry(`Git clone progress: ${progress.progress}%`, 'info');
+                    setTimeout(poll, pollInterval);
+                } else if (progress.status === 'clone_complete') {
+                    downloadBtn.innerHTML = `
+                        <div class="spinner"></div>
+                        Preparing transfer...
+                    `;
+                    this.updateProgress(90);
+                    this.addLogEntry('Git clone completed, preparing transfer...', 'info');
+                    setTimeout(poll, pollInterval);
+                } else if (progress.status === 'transferring') {
+                    downloadBtn.innerHTML = `
+                        <div class="spinner"></div>
+                        Transferring to server...
+                    `;
+                    this.updateProgress(95);
+                    this.addLogEntry('Transferring files to supercomputer...', 'info');
+                    setTimeout(poll, pollInterval);
+                } else if (progress.status === 'transfer_complete') {
+                    this.updateProgress(100);
+                    this.addLogEntry('Download completed successfully!', 'success');
+
+                    downloadBtn.innerHTML = `
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="20,6 9,17 4,12"/>
+                        </svg>
+                        Download Complete!
+                    `;
+                    downloadBtn.className = 'download-btn success';
+                    this.downloadInProgress = false;
+                } else if (progress.status === 'exists') {
+                    this.updateProgress(100);
+                    this.addLogEntry('Model already exists on supercomputer', 'success');
+
+                    downloadBtn.innerHTML = `
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="20,6 9,17 4,12"/>
+                        </svg>
+                        Already Downloaded
+                    `;
+                    downloadBtn.className = 'download-btn success';
+                    this.downloadInProgress = false;
+                } else if (progress.status === 'error') {
+                    this.addLogEntry(`Error: ${progress.message}`, 'error');
+                    this.showDownloadError(downloadBtn, progress.message);
+                } else if (pollCount < maxPolls) {
+                    // Continue polling
+                    pollCount++;
+                    setTimeout(poll, pollInterval);
+                } else {
+                    // Timeout
+                    this.addLogEntry('Download timeout - please try again', 'error');
+                    this.showDownloadError(downloadBtn, 'Download timeout');
+                }
+            } catch (error) {
+                console.error('Progress polling error:', error);
+                if (pollCount < maxPolls) {
+                    pollCount++;
+                    setTimeout(poll, pollInterval);
+                } else {
+                    this.addLogEntry('Progress check failed', 'error');
+                    this.showDownloadError(downloadBtn, 'Progress check failed');
+                }
+            }
+        };
+
+        // Start polling
+        setTimeout(poll, 1000);
     }
-  }
+
+    showDownloadError(downloadBtn, errorMessage) {
+        this.updateProgress(0);
+
+        downloadBtn.innerHTML = `
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="15" y1="9" x2="9" y2="15"/>
+                <line x1="9" y1="9" x2="15" y2="15"/>
+            </svg>
+            Download Failed
+        `;
+        downloadBtn.className = 'download-btn error';
+
+        // Reset button after 3 seconds
+        setTimeout(() => {
+            downloadBtn.innerHTML = `
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7,10 12,15 17,10"/>
+                    <line x1="12" y1="15" x2="12" y2="3"/>
+                </svg>
+                Download Model
+            `;
+            downloadBtn.className = 'download-btn';
+            downloadBtn.disabled = false;
+            this.downloadInProgress = false;
+            document.getElementById('progress-bar').style.display = 'none';
+        }, 3000);
+    }
+
+    async checkForOngoingDownload() {
+        if (!this.repoInfo || !this.serverOnline) return;
+
+        try {
+            const response = await fetch(`http://localhost:8000/progress/${this.repoInfo.author}/${this.repoInfo.repo_name}`);
+            const progress = await response.json();
+
+            // If there's an active download, resume progress display
+            if (progress.status && progress.status !== 'not_found' &&
+                progress.status !== 'transfer_complete' && progress.status !== 'error') {
+                console.log('Popup: Found ongoing download, resuming progress display');
+
+                this.downloadInProgress = true;
+                const downloadBtn = document.getElementById('download-btn');
+                const progressBar = document.getElementById('progress-bar');
+                const logSection = document.getElementById('log-section');
+
+                progressBar.style.display = 'block';
+                logSection.style.display = 'block';
+
+                this.addLogEntry('Resuming ongoing download...', 'info');
+                await this.pollProgress(downloadBtn);
+            }
+        } catch (error) {
+            console.log('Popup: No ongoing download found or server unavailable');
+        }
+    }
+
+    updateProgress(percent) {
+        const progressFill = document.getElementById('progress-fill');
+        progressFill.style.width = `${percent}%`;
+    }
+
+    addLogEntry(message, type = 'info') {
+        const logSection = document.getElementById('log-section');
+        const logEntry = document.createElement('div');
+        logEntry.className = `log-entry ${type}`;
+
+        const timestamp = new Date().toLocaleTimeString();
+        logEntry.textContent = `[${timestamp}] ${message}`;
+
+        logSection.appendChild(logEntry);
+        logSection.scrollTop = logSection.scrollHeight;
+    }
 }
 
 // Initialize popup when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
-  new PopupManager();
-});
-
-// Refresh data when popup is opened
-document.addEventListener('visibilitychange', async () => {
-  if (!document.hidden) {
-    // Popup is being shown, refresh data
-    new PopupManager();
-  }
+    new PopupController();
 });
