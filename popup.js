@@ -132,6 +132,7 @@ class PopupController {
         const downloadBtn = document.getElementById('download-btn');
         const progressBar = document.getElementById('progress-bar');
         const logSection = document.getElementById('log-section');
+        this.resetSizeInfo();
 
         // Update UI
         downloadBtn.innerHTML = `
@@ -177,6 +178,7 @@ class PopupController {
             try {
                 const response = await fetch(`http://localhost:8000/progress/${this.repoInfo.author}/${this.repoInfo.repo_name}`);
                 const progress = await response.json();
+                this.updateSizeInfo(progress);
 
                 if (progress.status === 'not_found' && pollCount < 5) {
                     // Still initializing, continue polling
@@ -190,6 +192,7 @@ class PopupController {
                     downloadBtn.innerHTML = `
                         <div class="spinner"></div>
                         Downloading... ${progress.progress}%
+                        ${this.renderSizeLabel(progress)}
                     `;
                     this.updateProgress(progress.progress);
                     this.addLogEntry(`Git clone progress: ${progress.progress}%`, 'info');
@@ -198,6 +201,7 @@ class PopupController {
                     downloadBtn.innerHTML = `
                         <div class="spinner"></div>
                         Preparing transfer...
+                        ${this.renderSizeLabel(progress)}
                     `;
                     this.updateProgress(90);
                     this.addLogEntry('Git clone completed, preparing transfer...', 'info');
@@ -206,6 +210,7 @@ class PopupController {
                     downloadBtn.innerHTML = `
                         <div class="spinner"></div>
                         Transferring to server...
+                        ${this.renderSizeLabel(progress)}
                     `;
                     this.updateProgress(95);
                     this.addLogEntry('Transferring files to supercomputer...', 'info');
@@ -219,6 +224,7 @@ class PopupController {
                             <polyline points="20,6 9,17 4,12"/>
                         </svg>
                         Download Complete!
+                        ${this.renderSizeLabel(progress)}
                     `;
                     downloadBtn.className = 'download-btn success';
                     this.downloadInProgress = false;
@@ -231,6 +237,7 @@ class PopupController {
                             <polyline points="20,6 9,17 4,12"/>
                         </svg>
                         Already Downloaded
+                        ${this.renderSizeLabel(progress)}
                     `;
                     downloadBtn.className = 'download-btn success';
                     this.downloadInProgress = false;
@@ -264,6 +271,7 @@ class PopupController {
 
     showDownloadError(downloadBtn, errorMessage) {
         this.updateProgress(0);
+        this.resetSizeInfo();
 
         downloadBtn.innerHTML = `
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -335,6 +343,54 @@ class PopupController {
 
         logSection.appendChild(logEntry);
         logSection.scrollTop = logSection.scrollHeight;
+    }
+
+    formatBytes(bytes) {
+        if (bytes === undefined || bytes === null) return null;
+        if (bytes === 0) return '0 B';
+
+        const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+        let value = bytes;
+        let unitIndex = 0;
+
+        while (value >= 1024 && unitIndex < units.length - 1) {
+            value /= 1024;
+            unitIndex += 1;
+        }
+
+        const precision = unitIndex === 0 ? 0 : 1;
+        return `${value.toFixed(precision)} ${units[unitIndex]}`;
+    }
+
+    renderSizeLabel(progress) {
+        const downloaded = this.formatBytes(progress.downloaded_bytes);
+        if (!downloaded) {
+            return '';
+        }
+
+        const total = this.formatBytes(progress.total_bytes);
+        const label = total ? `${downloaded} / ${total}` : downloaded;
+        return `<span style="display:block;font-size:12px;margin-top:4px;">${label}</span>`;
+    }
+
+    updateSizeInfo(progress) {
+        const sizeInfo = document.getElementById('size-info');
+        const downloadedText = this.formatBytes(progress.downloaded_bytes);
+
+        if (downloadedText) {
+            const totalText = this.formatBytes(progress.total_bytes);
+            const label = totalText ? `${downloadedText} / ${totalText}` : downloadedText;
+            sizeInfo.textContent = `Downloaded: ${label}`;
+            sizeInfo.style.display = 'block';
+        } else if (progress.status === 'error' || progress.status === 'not_found') {
+            this.resetSizeInfo();
+        }
+    }
+
+    resetSizeInfo() {
+        const sizeInfo = document.getElementById('size-info');
+        sizeInfo.style.display = 'none';
+        sizeInfo.textContent = '';
     }
 }
 

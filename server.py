@@ -199,15 +199,17 @@ class DownloadProxyServer:
             if size_bytes != last_reported_size:
                 message: str
                 progress_value: Optional[int] = None
+                effective_size = size_bytes
 
                 if expected_total and expected_total > 0:
                     clamped = min(size_bytes, expected_total)
                     ratio = clamped / expected_total
                     progress_value = min(99, int(ratio * 100))
                     message = (
-                        f"Downloading files... {self.format_bytes(size_bytes)} / "
+                        f"Downloading files... {self.format_bytes(clamped)} / "
                         f"{self.format_bytes(expected_total)}"
                     )
+                    effective_size = clamped
                 else:
                     message = f"Downloading files... {self.format_bytes(size_bytes)}"
 
@@ -224,7 +226,7 @@ class DownloadProxyServer:
                     "cloning",
                     message,
                     progress_value,
-                    downloaded_bytes=size_bytes
+                    downloaded_bytes=effective_size
                 )
                 last_reported_size = size_bytes
 
@@ -239,15 +241,17 @@ class DownloadProxyServer:
         if final_size != last_reported_size:
             message: str
             progress_value: Optional[int] = None
+            effective_final = final_size
 
             if expected_total and expected_total > 0:
                 clamped = min(final_size, expected_total)
                 ratio = clamped / expected_total
                 progress_value = min(99, int(ratio * 100))
                 message = (
-                    f"Downloading files... {self.format_bytes(final_size)} / "
+                    f"Downloading files... {self.format_bytes(clamped)} / "
                     f"{self.format_bytes(expected_total)}"
                 )
+                effective_final = clamped
             else:
                 message = f"Downloading files... {self.format_bytes(final_size)}"
 
@@ -264,7 +268,7 @@ class DownloadProxyServer:
                 "cloning",
                 message,
                 progress_value,
-                downloaded_bytes=final_size
+                downloaded_bytes=effective_final
             )
 
     def check_if_exists_on_supercomputer(self, author: str, repo_name: str) -> bool:
@@ -371,10 +375,13 @@ class DownloadProxyServer:
             current_entry = self.download_progress.get(progress_key, {})
             total_bytes = current_entry.get("total_bytes")
 
+            effective_final = final_size
             if total_bytes and total_bytes > 0:
+                clamped = min(final_size, total_bytes)
                 final_message = (
-                    f"Clone complete: {self.format_bytes(final_size)} / {self.format_bytes(total_bytes)}"
+                    f"Clone complete: {self.format_bytes(clamped)} / {self.format_bytes(total_bytes)}"
                 )
+                effective_final = clamped
             else:
                 final_message = f"Clone complete: {self.format_bytes(final_size)}"
 
@@ -384,7 +391,7 @@ class DownloadProxyServer:
                 "clone_complete",
                 final_message,
                 100,
-                downloaded_bytes=final_size
+                downloaded_bytes=effective_final
             )
             return str(local_repo_path)
         except Exception as e:
